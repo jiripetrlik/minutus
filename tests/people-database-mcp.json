@@ -1,0 +1,7 @@
+{
+    "people-database": {
+        "transport": "stdio",
+        "command": "python",
+        "args": ["people-database-mcp.py"]
+    }
+}

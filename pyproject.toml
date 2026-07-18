@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "minutus"
+version = "0.1.0"
+description = "CLI-based AI agent with tool-use, MCP integration, and human-in-the-loop approval"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Minutus Contributors"}]
+keywords = ["ai", "agent", "cli", "llm", "langchain", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "langchain~=1.3.0",
+    "langchain-core~=1.4.0",
+    "langchain-openai~=1.3.0",
+    "langchain-mcp-adapters~=0.3.0",
+    "langgraph~=1.2.0",
+    "langgraph-checkpoint~=4.1.0",
+    "langgraph-prebuilt~=1.1.0",
+    "async-typer==0.2.1",
+    "typer==0.25.0",
+    "prompt_toolkit~=3.0.0",
+    "pyperclip~=1.11.0",
+    "html2text>=2025.4.15",
+    "pypdf~=6.14.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jiripetrlik/minutus"
+Repository = "https://github.com/jiripetrlik/minutus"
+Issues = "https://github.com/jiripetrlik/minutus/issues"
+
+[project.optional-dependencies]
+test = [
+    "mcp~=1.28.0",
+    "pytest~=9.1.0",
+    "pytest-asyncio~=1.4.0",
+    "pexpect~=4.9.0",
+]
+
+[project.scripts]
+minutus = "minutus.minutus:app"
+
+[tool.pytest.ini_options]
+markers = [
+    "unit: marks tests as pure unit tests (no API key, no network, no subprocess)",
+    "e2e: marks tests as end-to-end integration tests (requires API key, network, spawns subprocess)",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minutus"]
