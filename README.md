@@ -68,6 +68,9 @@ endpoint options.
 - **Interactive & Single-Query Modes** — Rich terminal chat UI or one-shot queries via command-line flags
 - **Context Injection** — Pass files, clipboard contents, or images as context for the AI; local PDF and HTML files are converted to text automatically
 - **Built-in Tools** — File system operations (read, write, edit, search), shell command execution, and URL fetching
+  - `search_files` treats the query as a regular expression by default; pass `regex=false` (or escape metacharacters) to match a literal string
+  - `edit_file` and `write_file` write content literally and perform no escape processing — escaping is the caller's responsibility
+  - `read_file` returns one numbered line per physical line and preserves trailing whitespace (pass `show_whitespace=true` to make it visible)
 - **MCP Integration** — Connect to external MCP servers for extended tool capabilities
 - **Human-in-the-Loop Approval** — Approve or reject tool calls before execution
 - **Workspace Path Containment** — Built-in workspace file tools restrict paths to the working directory captured when Minutus starts; explicitly supplied CLI paths and other tools are not sandboxed

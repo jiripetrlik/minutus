@@ -188,3 +188,83 @@ class TestPathFormat:
         assert parts[0] == "file.txt"
         assert parts[1] == "1"
         assert parts[2] == " findme"
+# ---------------------------------------------------------------------------
+# Single-file targets
+# ---------------------------------------------------------------------------
+
+class TestSingleFileTarget:
+    """A file path must be searched, not silently skipped."""
+
+    def test_search_in_single_file_returns_matches(self, trusted_root):
+        (trusted_root / "file.txt").write_text("alpha\nfindme here\ngamma\n")
+        result = search_files.invoke({"query": "findme", "path": "file.txt"})
+        assert "file.txt" in result
+        assert "findme here" in result
+        assert result != "No matches found."
+
+    def test_search_in_single_file_no_matches(self, trusted_root):
+        (trusted_root / "file.txt").write_text("alpha\nbeta\n")
+        result = search_files.invoke({"query": "absent", "path": "file.txt"})
+        assert result == "No matches found."
+
+    def test_search_in_single_file_reports_line_number(self, trusted_root):
+        (trusted_root / "file.txt").write_text("alpha\nmefind\ngamma\n")
+        result = search_files.invoke({"query": "mefind", "path": "file.txt"})
+        line = result.strip().split("\n")[0]
+        assert line.split(":", 2)[1] == "2"
+
+
+# ---------------------------------------------------------------------------
+# Regex-by-default vs literal search
+# ---------------------------------------------------------------------------
+
+class TestRegexVersusLiteral:
+    """query is a regex by default; regex=False matches literal text."""
+
+    def test_regex_metacharacters_are_pattern_by_default(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a = next(iter(x))\n")
+        # As a regex, "(iter(x))" is a group and does not match the literal text.
+        result = search_files.invoke({"query": "next(iter(x))", "path": "."})
+        assert result == "No matches found."
+
+    def test_regex_false_matches_literal_metacharacters(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a = next(iter(x))\n")
+        result = search_files.invoke(
+            {"query": "next(iter(x))", "path": ".", "regex": False}
+        )
+        assert "next(iter(x))" in result
+
+    def test_regex_false_plain_text_still_matches(self, trusted_root):
+        (trusted_root / "file.txt").write_text("softmax applied\n")
+        result = search_files.invoke(
+            {"query": "softmax", "path": ".", "regex": False}
+        )
+        assert "softmax applied" in result
+
+
+# ---------------------------------------------------------------------------
+# Invalid-regex fallback visibility
+# ---------------------------------------------------------------------------
+
+class TestInvalidRegexFallback:
+    """Invalid regex falls back to literal matching and reports the note."""
+
+    def test_invalid_regex_fallback_includes_notice(self, trusted_root):
+        (trusted_root / "file.txt").write_text("this has [invalid in it\n")
+        result = search_files.invoke({"query": "[invalid", "path": "."})
+        assert "this has [invalid in it" in result
+        assert "not valid regex" in result
+
+    def test_invalid_regex_no_match_includes_notice(self, trusted_root):
+        (trusted_root / "file.txt").write_text("nothing relevant\n")
+        result = search_files.invoke({"query": "[invalid", "path": "."})
+        assert result.startswith("No matches found.")
+        assert "not valid regex" in result
+
+    def test_regex_false_has_no_notice(self, trusted_root):
+        (trusted_root / "file.txt").write_text("literal [invalid here\n")
+        result = search_files.invoke(
+            {"query": "[invalid", "path": ".", "regex": False}
+        )
+        assert "literal [invalid here" in result
+        assert "not valid regex" not in result

@@ -164,3 +164,47 @@ class TestErrors:
             "new_string": "b",
         })
         assert "Error: File 'mydir' does not exist." in result
+# ---------------------------------------------------------------------------
+# Literal replacement semantics (no escape processing)
+# ---------------------------------------------------------------------------
+
+class TestLiteralReplacement:
+    """edit_file performs a literal replace and never translates escapes."""
+
+    def test_edit_does_not_translate_backslash_n(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_text('"lineA\\n",\n"lineB\\n",\n')
+        # new_string contains the two characters backslash + n.
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": '"lineB\\n",',
+            "new_string": '"lineB2\\n",',
+        })
+        assert result == "Successfully edited file.txt."
+        # The literal backslash+n must survive unchanged (2 chars, not a newline).
+        assert f.read_text() == '"lineA\\n",\n"lineB2\\n",\n'
+        # Explicitly: the file must still contain the backslash-n sequence.
+        assert "\\n" in f.read_text()
+
+    def test_edit_real_newline_in_new_string_is_written(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_text("aXb\n")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "X",
+            "new_string": "\n",
+        })
+        assert result == "Successfully edited file.txt."
+        # A real newline argument becomes a real newline byte.
+        assert f.read_text() == "a\nb\n"
+
+    def test_edit_matches_exact_trailing_whitespace(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_text("keep   \ndrop\n")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "keep   \n",
+            "new_string": "keep\n",
+        })
+        assert result == "Successfully edited file.txt."
+        assert f.read_text() == "keep\ndrop\n"

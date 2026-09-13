@@ -953,12 +953,56 @@ def create_list_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
     return configured_list_files
 
 
+def strip_line_ending(line: str) -> str:
+    """Remove only the trailing newline (and a preceding carriage return).
+
+    Trailing spaces and tabs are preserved: they are real bytes on disk and
+    affect byte-exact operations such as ``edit_file`` matching.
+    """
+    if line.endswith("\n"):
+        line = line[:-1]
+        if line.endswith("\r"):
+            line = line[:-1]
+    return line
+
+
+def render_numbered_line(line: str, show_whitespace: bool) -> str:
+    """Render one file line for ``read_file`` output.
+
+    Line terminators are never shown. Trailing spaces and tabs are preserved
+    by default, because they are significant. When ``show_whitespace`` is set,
+    a trailing run of spaces and tabs is rendered with visible markers so it
+    cannot be mistaken for absent whitespace.
+    """
+    line = strip_line_ending(line)
+    if not show_whitespace:
+        return line
+    stripped = line.rstrip(" \t")
+    trailing = line[len(stripped):]
+    if not trailing:
+        return line
+    markers = "".join("\u2420" if ch == " " else "\u2409" for ch in trailing)
+    return f"{stripped}{markers}"
+
+
 def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
     @tool("read_file")
     def configured_read_file(
-        path: str, start_line: int = None, end_line: int = None
+        path: str,
+        start_line: int = None,
+        end_line: int = None,
+        show_whitespace: bool = False,
     ) -> str:
-        """Reads the contents of a file, returning lines with line numbers."""
+        """Reads a file and returns one numbered line per physical line.
+
+        Output format is ``N: <content>``. Line terminators (\\n or \\r\\n) are
+        not shown. Trailing spaces and tabs ARE preserved because they are real
+        on-disk bytes; pass show_whitespace=True to render a trailing run of
+        them with visible markers (\u2420 for space, \u2409 for tab). A single
+        physical line may itself contain the literal two-character sequence
+        backslash+n (as in JSON or Jupyter notebook source): that is one line,
+        not a line break. Use start_line/end_line to read a range.
+        """
         try:
             safe_path = get_safe_path(path)
         except ValueError as e:
@@ -977,7 +1021,7 @@ def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
         if end_line - start_line + 1 > max_input_lines:
             end_line = start_line + max_input_lines - 1
         output = "\n".join(
-            f"{i + 1}: {lines[i].rstrip()}"
+            f"{i + 1}: {render_numbered_line(lines[i], show_whitespace)}"
             for i in range(start_line - 1, min(end_line, total_lines))
         )
         if end_line < requested_end:
@@ -990,48 +1034,84 @@ def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
     return configured_read_file
 
 
+def iter_searchable_files(root: Path):
+    """Yield files to search under ``root``.
+
+    If ``root`` is a regular file, yield just that file. If it is a directory,
+    walk it recursively while skipping ``IGNORE_DIRS``.
+    """
+    if root.is_file():
+        yield root
+        return
+    for dirpath, dirs, filenames in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
 def create_search_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
     @tool("search_files")
-    def configured_search_files(query: str, path: str = ".") -> str:
-        """Searches file contents for a text string or regular expression."""
+    def configured_search_files(
+        query: str, path: str = ".", regex: bool = True
+    ) -> str:
+        """Searches file contents and returns "filepath:line: content" matches.
+
+        path may be a file or a directory (directories are searched recursively;
+        common build/vendor directories are skipped). By default query is a
+        REGULAR EXPRESSION: characters such as ( ) [ ] . * + ? | ^ $ have special
+        meaning, so a query like next(iter(x)) is treated as a pattern and will
+        NOT match that literal text. To match a literal string that contains
+        regex metacharacters, pass regex=False (or escape the metacharacters).
+        If regex=True and query is not valid regex, it is matched as literal
+        text and a note is appended to the result. Matching is case-sensitive by
+        default; use (?i) for case-insensitive. Results are capped; a truncation
+        marker is appended when the cap is hit.
+        """
         try:
             safe_path = get_safe_path(path)
         except ValueError as e:
             return str(e)
         if not safe_path.exists():
             return f"Error: Path '{path}' does not exist."
-        try:
-            pattern = re.compile(query)
-            matcher = lambda line: pattern.search(line) is not None
-        except re.error:
+
+        notice = None
+        if regex:
+            try:
+                pattern = re.compile(query)
+                matcher = lambda line: pattern.search(line) is not None
+            except re.error:
+                matcher = lambda line: query in line
+                notice = (
+                    "Note: query is not valid regex; matched as literal text."
+                )
+        else:
             matcher = lambda line: query in line
 
         results = []
         truncated = False
-        for root, dirs, filenames in os.walk(safe_path):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
-            for filename in filenames:
-                filepath = os.path.join(root, filename)
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        for i, line in enumerate(f, 1):
-                            if matcher(line):
-                                if len(results) == max_input_lines:
-                                    truncated = True
-                                    break
-                                clean_filepath = os.path.relpath(filepath, TRUSTED_ROOT)
-                                results.append(f"{clean_filepath}:{i}: {line.rstrip()}")
-                except (UnicodeDecodeError, PermissionError):
-                    continue
-                if truncated:
-                    break
+        for filepath in iter_searchable_files(safe_path):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        if matcher(line):
+                            if len(results) == max_input_lines:
+                                truncated = True
+                                break
+                            clean_filepath = os.path.relpath(filepath, TRUSTED_ROOT)
+                            results.append(f"{clean_filepath}:{i}: {line.rstrip()}")
+            except (UnicodeDecodeError, PermissionError):
+                continue
             if truncated:
                 break
         if not results:
+            if notice:
+                return f"No matches found. {notice}"
             return "No matches found."
         output = "\n".join(results)
         if truncated:
             output += f"\n... Truncated: showing first {max_input_lines:,} matching lines."
+        if notice:
+            output += f"\n... {notice}"
         return output
 
     return configured_search_files
@@ -1044,7 +1124,13 @@ search_files = create_search_files_tool()
 
 @tool
 def write_file(path: str, content: str) -> str:
-    """Creates a new file or overwrites an existing file with new content."""
+    """Creates a new file or overwrites an existing file with new content.
+
+    content is written literally, byte for byte: this tool performs NO escape
+    processing. This is the reliable choice for whole-file or format-critical
+    rewrites (for example JSON or Jupyter notebooks) where escaping must be
+    fully under the caller's control. Re-read the file afterward to verify.
+    """
     try:
         safe_path = get_safe_path(path)
     except ValueError as e:
@@ -1062,7 +1148,26 @@ def write_file(path: str, content: str) -> str:
 
 @tool
 def edit_file(path: str, old_string: str, new_string: str) -> str:
-    """Edits a file by replacing an exact, unique string with a new string."""
+    """Edits a file by replacing an exact, unique string with a new string.
+
+    This is a literal, byte-for-byte replacement. The tool performs NO escape
+    processing: the characters in old_string/new_string are written exactly as
+    given. In particular, the two characters backslash+n are written as
+    backslash+n, not as a newline; conversely a real newline in the argument is
+    written as a real newline. When editing formats that store escapes literally
+    (e.g. JSON or Jupyter notebooks, where a newline inside a string is the two
+    characters \\n), escaping is entirely the caller's responsibility.
+
+    old_string must be an exact, unique substring of the file. If it is absent
+    you get "old_string not found"; if it occurs more than once you get a
+    non-unique error. Copy old_string verbatim from read_file output (which
+    preserves trailing whitespace) to avoid mismatches.
+
+    This tool does not validate the file format. It reports success once the
+    substitution is written, even if the result is no longer valid JSON/HTML/etc.
+    For whole-file or format-critical rewrites, prefer write_file, then re-read
+    to verify.
+    """
     try:
         safe_path = get_safe_path(path)
     except ValueError as e:

@@ -192,3 +192,47 @@ class TestErrors:
         # for UnicodeDecodeError, so it should propagate.
         with pytest.raises(UnicodeDecodeError):
             read_file.invoke({"path": "binary.txt"})
+# ---------------------------------------------------------------------------
+# Line fidelity (trailing whitespace and line endings)
+# ---------------------------------------------------------------------------
+
+class TestLineFidelity:
+    """read_file preserves real bytes while hiding only line terminators."""
+
+    def test_read_preserves_trailing_whitespace(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a   \nb\n")
+        result = read_file.invoke({"path": "file.txt"})
+        lines = result.split("\n")
+        assert lines[0] == "1: a   "
+        assert lines[1] == "2: b"
+
+    def test_read_preserves_trailing_tab(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a\t\n")
+        result = read_file.invoke({"path": "file.txt"})
+        assert result == "1: a\t"
+
+    def test_read_hides_crlf_terminator(self, trusted_root):
+        (trusted_root / "file.txt").write_bytes(b"line1\r\nline2\r\n")
+        result = read_file.invoke({"path": "file.txt"})
+        assert "\r" not in result
+        lines = result.split("\n")
+        assert lines[0] == "1: line1"
+        assert lines[1] == "2: line2"
+
+    def test_show_whitespace_marks_trailing_spaces(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a   \nb\n")
+        result = read_file.invoke({"path": "file.txt", "show_whitespace": True})
+        lines = result.split("\n")
+        # Three trailing spaces rendered as three visible markers.
+        assert lines[0] == "1: a\u2420\u2420\u2420"
+        assert lines[1] == "2: b"
+
+    def test_show_whitespace_marks_trailing_tab(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a\t\n")
+        result = read_file.invoke({"path": "file.txt", "show_whitespace": True})
+        assert result == "1: a\u2409"
+
+    def test_show_whitespace_no_trailing_whitespace_unchanged(self, trusted_root):
+        (trusted_root / "file.txt").write_text("a b\n")
+        result = read_file.invoke({"path": "file.txt", "show_whitespace": True})
+        assert result == "1: a b"
