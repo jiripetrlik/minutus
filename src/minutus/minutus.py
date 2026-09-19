@@ -534,6 +534,70 @@ async def decide_tool_call(tool_call_message: dict, non_interactive: bool) -> di
     return {"type": "reject", "message": reason}
 
 
+def extract_hitl_actions(interrupts) -> list[tuple[dict, dict]]:
+    """Return ordered (action_request, review_config) pairs for human review.
+
+    Reads the human-in-the-loop interrupt payload produced by
+    ``HumanInTheLoopMiddleware``. Each interrupt value holds ``action_requests``
+    and ``review_configs`` (see the middleware's ``HITLRequest``). Only gated
+    calls appear here: auto-approved tools are never added to the batch.
+
+    Interrupts are de-duplicated by id so a repeat of the same pause is not
+    reviewed twice, and interrupts whose value is not a HITL request are
+    ignored.
+    """
+    pairs: list[tuple[dict, dict]] = []
+    seen_ids: set[str] = set()
+    for interrupt in interrupts:
+        interrupt_id = getattr(interrupt, "id", None)
+        if interrupt_id is not None and interrupt_id in seen_ids:
+            continue
+        value = getattr(interrupt, "value", interrupt)
+        if not isinstance(value, dict):
+            continue
+        action_requests = value.get("action_requests") or []
+        if not action_requests:
+            continue
+        if interrupt_id is not None:
+            seen_ids.add(interrupt_id)
+        review_configs = value.get("review_configs") or []
+        for index, action_request in enumerate(action_requests):
+            review_config = (
+                review_configs[index] if index < len(review_configs) else {}
+            )
+            pairs.append((action_request, review_config))
+    return pairs
+
+
+async def build_resume_payload(interrupts, non_interactive: bool) -> Optional[dict]:
+    """Prompt once per gated action and build a ``Command(resume=...)`` payload.
+
+    Decisions are collected in the same order as the interrupt's
+    ``action_requests``, as the middleware requires. Returns ``None`` when there
+    is nothing pending human review.
+
+    The CLI only offers approve/reject, which every configuration in this
+    application allows. The ``allowed_decisions`` check is a defensive guard so
+    a decision the tool's policy forbids is never submitted.
+    """
+    pairs = extract_hitl_actions(interrupts)
+    if not pairs:
+        return None
+
+    decisions: list[dict] = []
+    for action_request, review_config in pairs:
+        decision = await decide_tool_call(action_request, non_interactive)
+        allowed_decisions = review_config.get("allowed_decisions")
+        if allowed_decisions and decision["type"] not in allowed_decisions:
+            decision = {
+                "type": "reject",
+                "message": NON_INTERACTIVE_REJECTION_MESSAGE,
+            }
+        decisions.append(decision)
+
+    return {"decisions": decisions}
+
+
 async def get_reject_message() -> str:
     """
     Get a rejection reason/message from the user using prompt_toolkit.
@@ -1269,23 +1333,17 @@ async def invoke_with_tool_approval(
     """Invoke an agent and resume any human-in-the-loop tool interruptions."""
     result = await agent.ainvoke(agent_input, config=runnable_config)
 
-    while result.get("__interrupt__"):
-        decisions = []
-        for interrupt in result["__interrupt__"]:
-            value = getattr(interrupt, "value", interrupt)
-            action_requests = (
-                value.get("action_requests", []) if isinstance(value, dict) else []
-            )
-            for action_request in action_requests:
-                decisions.append(
-                    await decide_tool_call(action_request, non_interactive)
-                )
-
-        if not decisions:
+    while True:
+        interrupts = (
+            result.get("__interrupt__") if isinstance(result, dict) else None
+        )
+        if not interrupts:
+            break
+        payload = await build_resume_payload(interrupts, non_interactive)
+        if payload is None:
             raise RuntimeError("Tool approval interrupt contained no tool calls")
-
         result = await agent.ainvoke(
-            Command(resume={"decisions": decisions}), config=runnable_config
+            Command(resume=payload), config=runnable_config
         )
 
     return result
@@ -1300,8 +1358,14 @@ async def stream_response(
 ):
     """Stream an agent response while keeping one-shot stdout machine-clean.
 
+    Approval decisions are derived from the graph's human-in-the-loop interrupt
+    payload, not from the streamed tool-call chunks. Only gated calls appear in
+    that payload; auto-run tools execute inside the same run and never prompt.
+    This keeps the number of decisions aligned with the interrupt batch, which
+    the middleware requires.
+
     In one-shot mode (``atomic_output=True``), text from each attempt is buffered.
-    Failed attempts are discarded, and text from cycles that request tools is
+    Failed attempts are discarded, and text from cycles that pause for review is
     treated as progress rather than as the final result. Interactive chat keeps
     its live token streaming behavior.
     """
@@ -1312,56 +1376,50 @@ async def stream_response(
 
         async def _do_stream():
             attempt_text: list[str] = []
-            attempt_tool_calls: list[dict] = []
+            final_text: Optional[str] = None
             stream = await agent.astream_events(
                 agent_input, version="v3", config=runnable_config
             )
             async for message in stream.messages:
+                message_text: list[str] = []
+                has_tool_calls = False
                 async for delta in message.text:
+                    message_text.append(delta)
                     if atomic_output:
                         attempt_text.append(delta)
                     else:
                         write_result(delta, end="", flush=True)
 
-                tool_call_message = None
-                message_tool_calls: list[dict] = []
-                async for chunk in message.tool_calls:
-                    if (
-                        tool_call_message
-                        and tool_call_message["index"] != chunk["index"]
-                    ):
-                        message_tool_calls.append(tool_call_message)
-                    tool_call_message = chunk
-                if tool_call_message:
-                    message_tool_calls.append(tool_call_message)
-                # Keep the tool calls associated with the latest streamed
-                # assistant message, matching the response cycle being handled.
-                attempt_tool_calls = message_tool_calls
+                async for _chunk in message.tool_calls:
+                    has_tool_calls = True
 
-            return "".join(attempt_text), attempt_tool_calls
+                # A message without tool calls is a candidate final answer.
+                # Messages that request tools are progress, not the result.
+                if not has_tool_calls:
+                    final_text = "".join(message_text)
 
-        response_text, tool_call_messages = await retry_with_backoff(_do_stream)
+            # Driving the stream to completion surfaces the pause, if any.
+            interrupted = await stream.interrupted()
+            interrupts = await stream.interrupts() if interrupted else []
+            return final_text, "".join(attempt_text), interrupts
 
-        if tool_call_messages:
+        final_text, streamed_text, interrupts = await retry_with_backoff(_do_stream)
+
+        if interrupts:
             cont = True
-            decisions = []
-            if atomic_output:
-                if response_text:
-                    write_diagnostic(response_text)
-                for tool_call_message in tool_call_messages:
-                    tool_name = str(tool_call_message.get("name", "unknown"))
-                    tool_args = format_tool_arguments(tool_call_message.get("args", ""))
-                    write_diagnostic(
-                        f"Tool call: {tool_name}\nArguments: {tool_args}"
-                    )
-            for tool_call_message in tool_call_messages:
-                decisions.append(
-                    await decide_tool_call(tool_call_message, non_interactive)
-                )
+            if atomic_output and streamed_text:
+                write_diagnostic(streamed_text)
+            for action_request, _review_config in extract_hitl_actions(interrupts):
+                tool_name = str(action_request.get("name", "unknown"))
+                tool_args = format_tool_arguments(action_request.get("args", ""))
+                write_diagnostic(f"Tool call: {tool_name}\nArguments: {tool_args}")
 
-            agent_input = Command(resume={"decisions": decisions})
+            payload = await build_resume_payload(interrupts, non_interactive)
+            if payload is None:
+                raise RuntimeError("Tool approval interrupt contained no tool calls")
+            agent_input = Command(resume=payload)
         elif atomic_output:
-            write_result(response_text)
+            write_result(final_text or "")
 
         if not atomic_output:
             write_result("")

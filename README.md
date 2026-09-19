@@ -43,6 +43,7 @@ endpoint options.
   - [With URL Reading Tool](#with-url-reading-tool)
   - [With MCP Tools](#with-mcp-tools)
   - [With Auto-Run Tools](#with-auto-run-tools)
+  - [Tool Approval](#tool-approval)
   - [Non-Interactive Execution](#non-interactive-execution)
   - [Output Streams](#output-streams)
   - [With Structured Output](#with-structured-output)
@@ -72,7 +73,7 @@ endpoint options.
   - `edit_file` and `write_file` write content literally and perform no escape processing — escaping is the caller's responsibility
   - `read_file` returns one numbered line per physical line and preserves trailing whitespace (pass `show_whitespace=true` to make it visible)
 - **MCP Integration** — Connect to external MCP servers for extended tool capabilities
-- **Human-in-the-Loop Approval** — Approve or reject tool calls before execution
+- **Human-in-the-Loop Approval** — Approve or reject tool calls before execution; only tools that require review are surfaced, and auto-run tools execute in the same turn
 - **Workspace Path Containment** — Built-in workspace file tools restrict paths to the working directory captured when Minutus starts; explicitly supplied CLI paths and other tools are not sandboxed
 - **Conversation Summarization** — Automatically summarizes long conversations to manage context limits
 - **Structured Output** — Supports JSON schema-based structured output for programmatic use
@@ -275,6 +276,23 @@ minutus --model-name gpt-5.6-terra \
   --prompt "Find all TODO comments in this project"
 ```
 
+### Tool Approval
+
+Every enabled tool is gated by default: when the model proposes a call, Minutus
+pauses before execution and asks you to allow or reject it. Approval decisions
+come from the run's human-in-the-loop interrupt, so only tools that actually
+require review are shown. A single model turn may call several tools, and each
+gated call is reviewed in the order it was requested.
+
+Tools authorized with `--auto-run-tools` or `--auto-run-all-tools` are not part
+of that review. They execute within the same model turn without prompting, so a
+turn that mixes an auto-run tool with a gated one prompts only for the gated
+tool.
+
+Rejecting a call does not stop the run: the rejection is returned to the model
+so it can continue, for example by taking a safer alternative or explaining
+what it could not do.
+
 ### Non-Interactive Execution
 
 ```bash
@@ -310,7 +328,8 @@ Single-query output follows a script-friendly stream contract:
 One-shot responses are buffered until an attempt succeeds, so a failed stream
 cannot leave a partial answer on stdout. Text produced before a tool call is
 reported as progress on stderr; only the terminal assistant response is written
-to stdout.
+to stdout. When a run pauses for approval, the pending `Tool call: ...` details
+are written to stderr as diagnostics, never to stdout.
 
 ```bash
 # Capture the result while retaining diagnostics separately.
