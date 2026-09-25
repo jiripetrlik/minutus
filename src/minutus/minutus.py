@@ -51,6 +51,7 @@ import textwrap
 import traceback
 import math
 import ntpath
+import pathspec
 from functools import wraps
 
 
@@ -118,7 +119,187 @@ TRUSTED_ROOT = Path.cwd().resolve()
 # Directories to ignore to save context tokens
 IGNORE_DIRS = {".git", "node_modules", "__pycache__", "venv", ".venv", "dist", "build"}
 
+# Ignore files honored by the workspace tools, in evaluation order. Both use the
+# gitignore pattern syntax. Files closer to the target are evaluated later, so
+# they win; within a directory ".gitignore" is evaluated before ".aiignore", so
+# ".aiignore" can add rules or re-include ("!") paths ignored by ".gitignore".
+IGNORE_FILES = (".gitignore", ".aiignore")
+
 DEFAULT_MAX_INPUT_LINES = 5000
+
+
+class WorkspaceIgnore:
+    """Evaluates gitignore-style ignore files for the workspace tools.
+
+    Two ignore files are honored per directory: ``.gitignore`` and
+    ``.aiignore`` (see ``IGNORE_FILES``). Patterns are matched relative to the
+    directory that contains the ignore file, using the ``gitwildmatch`` syntax
+    (so ``!`` negation, anchoring, ``**``, and directory-only ``dir/`` patterns
+    all behave as in Git).
+
+    Evaluation walks from the workspace root down to the target's parent. Files
+    closer to the target are evaluated later and therefore take precedence;
+    within one directory ``.gitignore`` is evaluated before ``.aiignore``.
+
+    Parsed patterns are cached and invalidated when an ignore file's size or
+    modification time changes, so edits made during a long session are picked
+    up. The workspace root is read from the caller on every query rather than
+    captured at construction time.
+    """
+
+    def __init__(self, enabled: bool = True, filenames: tuple[str, ...] = IGNORE_FILES):
+        self.enabled = enabled
+        self.filenames = tuple(filenames)
+        # (ignore_file_path) -> (mtime_ns, size, spec_or_None)
+        self._cache: dict[Path, tuple[int, int, pathspec.PathSpec | None]] = {}
+
+    def _load_spec(self, ignore_file: Path) -> pathspec.PathSpec | None:
+        """Return the parsed spec for ``ignore_file`` or None when absent/unreadable."""
+        try:
+            stat = ignore_file.stat()
+        except OSError:
+            self._cache.pop(ignore_file, None)
+            return None
+        key = (stat.st_mtime_ns, stat.st_size)
+        cached = self._cache.get(ignore_file)
+        if cached is not None and cached[0] == key[0] and cached[1] == key[1]:
+            return cached[2]
+        try:
+            text = ignore_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            self._cache[ignore_file] = (key[0], key[1], None)
+            return None
+        lines = text.splitlines()
+        try:
+            spec = _build_spec(lines)
+        except Exception:
+            spec = None
+        self._cache[ignore_file] = (key[0], key[1], spec)
+        return spec
+
+    def _decide(self, rel_path: Path, is_dir: bool) -> tuple[bool, Path | None]:
+        """Evaluate each ignore file that governs ``rel_path`` (root .. parent).
+
+        ``rel_path`` is relative to the workspace root. For every ancestor
+        directory the candidate is matched relative to that directory, so
+        per-directory ignore files apply to their own subtree only.
+        """
+        root = TRUSTED_ROOT
+        parts = rel_path.parts
+        ignored = False
+        source: Path | None = None
+
+        # depth 0 is the workspace root; depth d is the d-th ancestor directory.
+        # Ascending depth means deeper (closer) ignore files are applied last
+        # and therefore take precedence.
+        for depth in range(len(parts)):
+            directory = root.joinpath(*parts[:depth])
+            target = "/".join(parts[depth:])
+            if is_dir and not target.endswith("/"):
+                target = f"{target}/"
+            for filename in self.filenames:
+                ignore_file = directory / filename
+                spec = self._load_spec(ignore_file)
+                if spec is None:
+                    continue
+                decision = _spec_decision(spec, target)
+                if decision is not None:
+                    ignored, source = decision, ignore_file
+
+        return ignored, source
+
+    def decision(self, path: Path, is_dir: bool = False) -> tuple[bool, Path | None]:
+        """Return ``(ignored, source)`` for an absolute ``path``.
+
+        ``source`` is the ignore file that produced the deciding rule, or None
+        when no rule matched. Directories must pass ``is_dir=True`` so that
+        directory-only patterns such as ``build/`` are honored.
+
+        Mirroring Git, a file cannot be re-included when one of its ancestor
+        directories is excluded, so an ignored ancestor forces the result.
+        """
+        if not self.enabled:
+            return False, None
+
+        try:
+            rel_path = path.relative_to(TRUSTED_ROOT)
+        except ValueError:
+            return False, None
+        if not rel_path.parts:
+            # The workspace root itself can never be ignored.
+            return False, None
+
+        ignored, source = self._decide(rel_path, is_dir=is_dir)
+
+        # An ignored ancestor directory always wins over a re-inclusion.
+        for depth in range(1, len(rel_path.parts)):
+            ancestor_rel = Path(*rel_path.parts[:depth])
+            ancestor_ignored, ancestor_source = self._decide(ancestor_rel, is_dir=True)
+            if ancestor_ignored:
+                ignored, source = True, ancestor_source
+
+        return ignored, source
+
+    def check(self, path: Path, is_dir: bool = False) -> Path | None:
+        """Return the deciding ignore file when ``path`` is ignored, else None."""
+        ignored, source = self.decision(path, is_dir=is_dir)
+        return source if ignored else None
+
+
+def get_workspace_ignore(enabled: bool) -> WorkspaceIgnore:
+    """Build an ignore matcher for the current trusted workspace root."""
+    return WorkspaceIgnore(enabled=enabled)
+
+
+def _build_spec(lines: list[str]) -> "pathspec.PathSpec":
+    """Build a spec from gitignore lines.
+
+    ``GitIgnoreSpec`` (pathspec >= 0.11) implements the precise last-match-wins
+    Git semantics; fall back to a ``gitwildmatch`` ``PathSpec`` otherwise.
+    """
+    gitignore_spec = getattr(pathspec, "GitIgnoreSpec", None)
+    if gitignore_spec is not None:
+        return gitignore_spec.from_lines(lines)
+    return pathspec.PathSpec.from_lines("gitwildmatch", lines)
+
+
+def _spec_decision(spec: "pathspec.PathSpec", target: str) -> bool | None:
+    """Return True (ignored), False (re-included), or None (no rule matched).
+
+    Uses ``check_file`` when available so that ``!`` negation is distinguished
+    from "no rule matched"; falls back to ``match_file`` otherwise.
+    """
+    check_file = getattr(spec, "check_file", None)
+    if check_file is not None:
+        try:
+            result = check_file(target)
+        except Exception:
+            return None
+        index = getattr(result, "index", None)
+        if index is None:
+            return None
+        return bool(getattr(result, "include", False))
+    try:
+        return bool(spec.match_file(target))
+    except Exception:
+        return None
+
+
+def ensure_not_ignored(
+    safe_path: Path, user_path: str, ignore: WorkspaceIgnore, is_dir: bool = False
+) -> str | None:
+    """Return an error message when ``safe_path`` is excluded by ignore rules."""
+    source = ignore.check(safe_path, is_dir=is_dir)
+    if source is None:
+        return None
+    try:
+        source_display = source.relative_to(TRUSTED_ROOT).as_posix()
+    except ValueError:
+        source_display = str(source)
+    return (
+        f"Error: Path '{user_path}' is excluded by ignore rules "
+        f"({source_display})."
+    )
 
 
 def validate_max_input_lines(max_input_lines: int) -> None:
@@ -990,7 +1171,12 @@ def get_safe_path(user_path: str) -> Path:
     return candidate
 
 
-def create_list_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
+def create_list_files_tool(
+    max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
+    respect_ignore_files: bool = True,
+):
+    ignore = get_workspace_ignore(respect_ignore_files)
+
     @tool("list_files")
     def configured_list_files(path: str = ".", recursive: bool = False) -> str:
         """Lists files and directories in the specified path."""
@@ -1000,15 +1186,30 @@ def create_list_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
             return str(e)
         if not safe_path.is_dir():
             return f"Error: '{path}' is not a directory."
+        ignored_error = ensure_not_ignored(safe_path, path, ignore, is_dir=True)
+        if ignored_error is not None:
+            return ignored_error
 
         files = []
         if recursive:
             for root, dirs, filenames in os.walk(safe_path):
-                dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d not in IGNORE_DIRS
+                    and not ignore.check(Path(root) / d, is_dir=True)
+                ]
                 for filename in filenames:
-                    files.append(os.path.relpath(os.path.join(root, filename), safe_path))
+                    full_path = Path(root) / filename
+                    if ignore.check(full_path):
+                        continue
+                    files.append(os.path.relpath(full_path, safe_path))
         else:
-            files.extend(os.listdir(safe_path))
+            for name in os.listdir(safe_path):
+                full_path = safe_path / name
+                if ignore.check(full_path, is_dir=full_path.is_dir()):
+                    continue
+                files.append(name)
 
         if not files:
             return "Directory is empty."
@@ -1049,7 +1250,12 @@ def render_numbered_line(line: str, show_whitespace: bool) -> str:
     return f"{stripped}{markers}"
 
 
-def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
+def create_read_file_tool(
+    max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
+    respect_ignore_files: bool = True,
+):
+    ignore = get_workspace_ignore(respect_ignore_files)
+
     @tool("read_file")
     def configured_read_file(
         path: str,
@@ -1066,6 +1272,8 @@ def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
         physical line may itself contain the literal two-character sequence
         backslash+n (as in JSON or Jupyter notebook source): that is one line,
         not a line break. Use start_line/end_line to read a range.
+
+        Paths excluded by .gitignore or .aiignore are refused.
         """
         try:
             safe_path = get_safe_path(path)
@@ -1073,6 +1281,9 @@ def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
             return str(e)
         if not safe_path.is_file():
             return f"Error: File '{path}' does not exist."
+        ignored_error = ensure_not_ignored(safe_path, path, ignore)
+        if ignored_error is not None:
+            return ignored_error
 
         with open(safe_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -1098,22 +1309,38 @@ def create_read_file_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
     return configured_read_file
 
 
-def iter_searchable_files(root: Path):
+def iter_searchable_files(root: Path, ignore: "WorkspaceIgnore | None" = None):
     """Yield files to search under ``root``.
 
     If ``root`` is a regular file, yield just that file. If it is a directory,
-    walk it recursively while skipping ``IGNORE_DIRS``.
+    walk it recursively while skipping ``IGNORE_DIRS`` and any path excluded by
+    the supplied ignore matcher.
     """
     if root.is_file():
         yield root
         return
     for dirpath, dirs, filenames in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        pruned = []
+        for d in dirs:
+            if d in IGNORE_DIRS:
+                continue
+            if ignore is not None and ignore.check(Path(dirpath) / d, is_dir=True):
+                continue
+            pruned.append(d)
+        dirs[:] = pruned
         for name in filenames:
-            yield Path(dirpath) / name
+            full_path = Path(dirpath) / name
+            if ignore is not None and ignore.check(full_path):
+                continue
+            yield full_path
 
 
-def create_search_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
+def create_search_files_tool(
+    max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
+    respect_ignore_files: bool = True,
+):
+    ignore = get_workspace_ignore(respect_ignore_files)
+
     @tool("search_files")
     def configured_search_files(
         query: str, path: str = ".", regex: bool = True
@@ -1130,6 +1357,8 @@ def create_search_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
         text and a note is appended to the result. Matching is case-sensitive by
         default; use (?i) for case-insensitive. Results are capped; a truncation
         marker is appended when the cap is hit.
+
+        Paths excluded by .gitignore or .aiignore are skipped.
         """
         try:
             safe_path = get_safe_path(path)
@@ -1137,6 +1366,14 @@ def create_search_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
             return str(e)
         if not safe_path.exists():
             return f"Error: Path '{path}' does not exist."
+        if safe_path.is_file():
+            ignored_error = ensure_not_ignored(safe_path, path, ignore)
+            if ignored_error is not None:
+                return ignored_error
+        else:
+            ignored_error = ensure_not_ignored(safe_path, path, ignore, is_dir=True)
+            if ignored_error is not None:
+                return ignored_error
 
         notice = None
         if regex:
@@ -1153,7 +1390,7 @@ def create_search_files_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
 
         results = []
         truncated = False
-        for filepath in iter_searchable_files(safe_path):
+        for filepath in iter_searchable_files(safe_path, ignore):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     for i, line in enumerate(f, 1):
@@ -1186,102 +1423,143 @@ read_file = create_read_file_tool()
 search_files = create_search_files_tool()
 
 
-@tool
-def write_file(path: str, content: str) -> str:
-    """Creates a new file or overwrites an existing file with new content.
+def create_write_file_tool(respect_ignore_files: bool = True):
+    ignore = get_workspace_ignore(respect_ignore_files)
 
-    content is written literally, byte for byte: this tool performs NO escape
-    processing. This is the reliable choice for whole-file or format-critical
-    rewrites (for example JSON or Jupyter notebooks) where escaping must be
-    fully under the caller's control. Re-read the file afterward to verify.
-    """
-    try:
-        safe_path = get_safe_path(path)
-    except ValueError as e:
-        return str(e)
+    @tool("write_file")
+    def configured_write_file(path: str, content: str) -> str:
+        """Creates a new file or overwrites an existing file with new content.
 
-    parent_dir = safe_path.parent
-    if not parent_dir.exists():
-        parent_dir.mkdir(parents=True, exist_ok=True)
+        content is written literally, byte for byte: this tool performs NO escape
+        processing. This is the reliable choice for whole-file or format-critical
+        rewrites (for example JSON or Jupyter notebooks) where escaping must be
+        fully under the caller's control. Re-read the file afterward to verify.
 
-    with open(safe_path, "w", encoding="utf-8") as f:
-        f.write(content)
+        Paths excluded by .gitignore or .aiignore are refused, including paths
+        whose parent directory would have to be created inside an ignored tree.
+        """
+        try:
+            safe_path = get_safe_path(path)
+        except ValueError as e:
+            return str(e)
 
-    return f"Successfully wrote {len(content)} characters to {path}."
+        ignored_error = ensure_not_ignored(safe_path, path, ignore)
+        if ignored_error is not None:
+            return ignored_error
 
+        parent_dir = safe_path.parent
+        if not parent_dir.exists():
+            parent_dir.mkdir(parents=True, exist_ok=True)
 
-@tool
-def edit_file(path: str, old_string: str, new_string: str) -> str:
-    """Edits a file by replacing an exact, unique string with a new string.
+        with open(safe_path, "w", encoding="utf-8") as f:
+            f.write(content)
 
-    This is a literal, byte-for-byte replacement. The tool performs NO escape
-    processing: the characters in old_string/new_string are written exactly as
-    given. In particular, the two characters backslash+n are written as
-    backslash+n, not as a newline; conversely a real newline in the argument is
-    written as a real newline. When editing formats that store escapes literally
-    (e.g. JSON or Jupyter notebooks, where a newline inside a string is the two
-    characters \\n), escaping is entirely the caller's responsibility.
+        return f"Successfully wrote {len(content)} characters to {path}."
 
-    old_string must be an exact, unique substring of the file. If it is absent
-    you get "old_string not found"; if it occurs more than once you get a
-    non-unique error. Copy old_string verbatim from read_file output (which
-    preserves trailing whitespace) to avoid mismatches.
-
-    This tool does not validate the file format. It reports success once the
-    substitution is written, even if the result is no longer valid JSON/HTML/etc.
-    For whole-file or format-critical rewrites, prefer write_file, then re-read
-    to verify.
-    """
-    try:
-        safe_path = get_safe_path(path)
-    except ValueError as e:
-        return str(e)
-
-    if not safe_path.is_file():
-        return f"Error: File '{path}' does not exist."
-
-    with open(safe_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    count = content.count(old_string)
-    if count == 0:
-        return f"Error: old_string not found in {path}."
-    if count > 1:
-        return f"Error: old_string is not unique (found {count} times). Provide more surrounding lines to make it unique."
-
-    new_content = content.replace(old_string, new_string)
-    with open(safe_path, "w", encoding="utf-8") as f:
-        f.write(new_content)
-
-    return f"Successfully edited {path}."
+    return configured_write_file
 
 
-@tool
-def append_file(path: str, content: str) -> str:
-    """Appends text to the very end of an existing file."""
-    try:
-        safe_path = get_safe_path(path)
-    except ValueError as e:
-        return str(e)
+def create_edit_file_tool(respect_ignore_files: bool = True):
+    ignore = get_workspace_ignore(respect_ignore_files)
 
-    if not safe_path.is_file():
-        return (
-            f"Error: File '{path}' does not exist. Use write_file to create it first."
-        )
+    @tool("edit_file")
+    def configured_edit_file(path: str, old_string: str, new_string: str) -> str:
+        """Edits a file by replacing an exact, unique string with a new string.
 
-    with open(safe_path, "r+", encoding="utf-8") as f:
-        f.seek(0, os.SEEK_END)
-        file_size = f.tell()
+        This is a literal, byte-for-byte replacement. The tool performs NO escape
+        processing: the characters in old_string/new_string are written exactly as
+        given. In particular, the two characters backslash+n are written as
+        backslash+n, not as a newline; conversely a real newline in the argument is
+        written as a real newline. When editing formats that store escapes literally
+        (e.g. JSON or Jupyter notebooks, where a newline inside a string is the two
+        characters \\n), escaping is entirely the caller's responsibility.
 
-        if file_size > 0:
-            f.seek(file_size - 1)
-            last_char = f.read(1)
-            if last_char != "\n":
-                f.write("\n")
+        old_string must be an exact, unique substring of the file. If it is absent
+        you get "old_string not found"; if it occurs more than once you get a
+        non-unique error. Copy old_string verbatim from read_file output (which
+        preserves trailing whitespace) to avoid mismatches.
 
-        f.write(content)
+        This tool does not validate the file format. It reports success once the
+        substitution is written, even if the result is no longer valid JSON/HTML/etc.
+        For whole-file or format-critical rewrites, prefer write_file, then re-read
+        to verify.
 
-    return f"Successfully appended {len(content)} characters to {path}."
+        Paths excluded by .gitignore or .aiignore are refused.
+        """
+        try:
+            safe_path = get_safe_path(path)
+        except ValueError as e:
+            return str(e)
+
+        if not safe_path.is_file():
+            return f"Error: File '{path}' does not exist."
+
+        ignored_error = ensure_not_ignored(safe_path, path, ignore)
+        if ignored_error is not None:
+            return ignored_error
+
+        with open(safe_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        count = content.count(old_string)
+        if count == 0:
+            return f"Error: old_string not found in {path}."
+        if count > 1:
+            return f"Error: old_string is not unique (found {count} times). Provide more surrounding lines to make it unique."
+
+        new_content = content.replace(old_string, new_string)
+        with open(safe_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        return f"Successfully edited {path}."
+
+    return configured_edit_file
+
+
+def create_append_file_tool(respect_ignore_files: bool = True):
+    ignore = get_workspace_ignore(respect_ignore_files)
+
+    @tool("append_file")
+    def configured_append_file(path: str, content: str) -> str:
+        """Appends text to the very end of an existing file.
+
+        Paths excluded by .gitignore or .aiignore are refused.
+        """
+        try:
+            safe_path = get_safe_path(path)
+        except ValueError as e:
+            return str(e)
+
+        if not safe_path.is_file():
+            return (
+                f"Error: File '{path}' does not exist. Use write_file to create it first."
+            )
+
+        ignored_error = ensure_not_ignored(safe_path, path, ignore)
+        if ignored_error is not None:
+            return ignored_error
+
+        with open(safe_path, "r+", encoding="utf-8") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+
+            if file_size > 0:
+                f.seek(file_size - 1)
+                last_char = f.read(1)
+                if last_char != "\n":
+                    f.write("\n")
+
+            f.write(content)
+
+        return f"Successfully appended {len(content)} characters to {path}."
+
+    return configured_append_file
+
+
+# Retain importable default tools for library users and backwards compatibility.
+write_file = create_write_file_tool()
+edit_file = create_edit_file_tool()
+append_file = create_append_file_tool()
 
 
 def prepare_message_content(
@@ -1542,6 +1820,14 @@ async def chat(
             "precedence if both workspace flags are supplied"
         ),
     ),
+    respect_ignore_files: bool = typer.Option(
+        True,
+        "--respect-ignore-files/--no-ignore-files",
+        help=(
+            "Honor .gitignore and .aiignore when listing, reading, searching, and "
+            "editing workspace files"
+        ),
+    ),
     debug: bool = typer.Option(
         False, help="Show tracebacks for unexpected errors"
     ),
@@ -1554,6 +1840,10 @@ async def chat(
         # Typer resolves OptionInfo defaults only when invoking through the CLI.
         if isinstance(max_input_lines, typer.models.OptionInfo):
             max_input_lines = DEFAULT_MAX_INPUT_LINES
+
+        # Direct Python callers written before this option was added may omit it.
+        if isinstance(respect_ignore_files, typer.models.OptionInfo):
+            respect_ignore_files = True
 
         # Validate parameter combinations
         if prompt and prompt_file:
@@ -1630,9 +1920,15 @@ async def chat(
         if use_read_url_tool:
             tools.append(create_read_url_tool(max_input_lines))
 
-        configured_list_files = create_list_files_tool(max_input_lines)
-        configured_read_file = create_read_file_tool(max_input_lines)
-        configured_search_files = create_search_files_tool(max_input_lines)
+        configured_list_files = create_list_files_tool(
+            max_input_lines, respect_ignore_files
+        )
+        configured_read_file = create_read_file_tool(
+            max_input_lines, respect_ignore_files
+        )
+        configured_search_files = create_search_files_tool(
+            max_input_lines, respect_ignore_files
+        )
 
         # Read-write mode includes read-only tools and takes precedence when both
         # workspace flags are supplied.
@@ -1642,9 +1938,9 @@ async def chat(
                     configured_list_files,
                     configured_read_file,
                     configured_search_files,
-                    write_file,
-                    edit_file,
-                    append_file,
+                    create_write_file_tool(respect_ignore_files),
+                    create_edit_file_tool(respect_ignore_files),
+                    create_append_file_tool(respect_ignore_files),
                 ]
             )
         elif read_only_workspace_tools:

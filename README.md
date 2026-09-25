@@ -360,6 +360,39 @@ minutus --max-input-lines 5000 --files large.log \
 The complete file, download, or subprocess output may still be read into memory
 before its model-facing text is truncated.
 
+### Ignore files
+
+By default, the workspace tools honor `.gitignore` and `.aiignore` files. Rules
+apply to `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`,
+and `append_file` only; shell commands, URL fetching, MCP servers, and paths
+passed to CLI options such as `--files` are user-authorized and are unaffected.
+
+- Both files use gitignore pattern syntax (`!` negation, anchoring, `**`, and
+  directory-only `dir/` patterns are supported).
+- Ignore files are read from the workspace root down to the target's directory.
+  A file closer to the target wins over a shallower one. Within a directory,
+  `.gitignore` is read before `.aiignore`, so `.aiignore` can add rules or
+  re-include (with `!`) paths ignored by `.gitignore`.
+- `list_files` and `search_files` silently skip ignored paths. `read_file`,
+  `write_file`, `edit_file`, and `append_file` refuse an ignored path with an
+  error naming the ignore file that matched. `write_file` also refuses targets
+  whose missing parent directory would be created inside an ignored tree.
+- A file re-included with `!` inside an ignored directory is not discovered by
+  `list_files` or `search_files`, because the directory itself is pruned during
+  traversal.
+- Edits to an ignore file are picked up during a session.
+
+Pass `--no-ignore-files` to disable this behavior.
+
+```bash
+# Ignore rules are on by default
+minutus --read-write-workspace-tools --prompt "Summarize the project layout"
+
+# Disable ignore rules
+minutus --read-write-workspace-tools --no-ignore-files \
+  --prompt "Read the generated secrets file"
+```
+
 ### With Structured Output
 
 Provider-native structured output is used by default:
@@ -410,6 +443,7 @@ Minutus uses the OpenAI-compatible API format. The following options are availab
 | `--use-read-url-tool` | Enable URL reading tool | `False` |
 | `--read-only-workspace-tools` | Enable read-only file tools | `False` |
 | `--read-write-workspace-tools` | Enable read-write file tools | `False` |
+| `--respect-ignore-files` / `--no-ignore-files` | Honor `.gitignore` and `.aiignore` in the workspace tools | `True` |
 | `--auto-run-tools` | Enabled tool names that run without confirmation; unknown names are errors (can be repeated) | — |
 | `--auto-run-all-tools` | All tools run without confirmation | `False` |
 | `--non-interactive` | Never prompt; reject tool calls not explicitly authorized | `False` |
