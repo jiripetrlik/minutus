@@ -27,8 +27,9 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import minutus.minutus as minutus_mod
-from minutus.minutus import read_url
+from minutus.minutus import create_read_url_tool, read_url
 from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
 pytestmark = pytest.mark.unit
 
@@ -259,3 +260,97 @@ class TestGenericException:
         monkeypatch.setattr(minutus_mod, "urlopen", _raise_value_error)
         result = read_url.invoke({"url": "https://example.com"})
         assert result == "Failed to process URL: bad thing"
+
+
+# ---------------------------------------------------------------------------
+# User-Agent header configuration
+# ---------------------------------------------------------------------------
+
+def make_recording_urlopen(body: bytes, content_type: str = "text/plain"):
+    """Return a (urlopen, calls) pair that records how it was invoked."""
+    response = MagicMock()
+    response.read.return_value = body
+    response.headers.get.return_value = content_type
+    response.__enter__ = lambda self: self
+    response.__exit__ = lambda self, *args: None
+
+    calls = []
+
+    def _urlopen(url, timeout=10):
+        calls.append(url)
+        return response
+
+    return _urlopen, calls
+
+
+class TestUserAgentHeader:
+    """Tests for the optional User-Agent header on the read_url tool."""
+
+    def test_env_unset_keeps_default_behavior(self, monkeypatch):
+        # With no env var set, urlopen receives a plain str (not a Request).
+        monkeypatch.delenv("MINUTUS_READ_URL_USER_AGENT", raising=False)
+        fake, calls = make_recording_urlopen(b"body")
+        monkeypatch.setattr(minutus_mod, "urlopen", fake)
+
+        tool = create_read_url_tool()
+        result = tool.invoke({"url": "https://example.com/page"})
+
+        assert result == "body"
+        assert len(calls) == 1
+        assert isinstance(calls[0], str)
+        assert calls[0] == "https://example.com/page"
+
+    def test_env_set_sends_request_with_header(self, monkeypatch):
+        monkeypatch.setenv("MINUTUS_READ_URL_USER_AGENT", "MyBot/1.0")
+        fake, calls = make_recording_urlopen(b"body")
+        monkeypatch.setattr(minutus_mod, "urlopen", fake)
+
+        tool = create_read_url_tool()
+        result = tool.invoke({"url": "https://example.com/page"})
+
+        assert result == "body"
+        assert len(calls) == 1
+        request = calls[0]
+        assert isinstance(request, Request)
+        assert request.full_url == "https://example.com/page"
+        assert request.get_header("User-agent") == "MyBot/1.0"
+
+    def test_env_whitespace_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("MINUTUS_READ_URL_USER_AGENT", "   ")
+        fake, calls = make_recording_urlopen(b"body")
+        monkeypatch.setattr(minutus_mod, "urlopen", fake)
+
+        tool = create_read_url_tool()
+        tool.invoke({"url": "https://example.com/page"})
+
+        assert len(calls) == 1
+        assert isinstance(calls[0], str)
+
+    def test_explicit_argument_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("MINUTUS_READ_URL_USER_AGENT", "EnvBot/9.9")
+        fake, calls = make_recording_urlopen(b"body")
+        monkeypatch.setattr(minutus_mod, "urlopen", fake)
+
+        tool = create_read_url_tool(user_agent="Explicit/2.0")
+        tool.invoke({"url": "https://example.com/page"})
+
+        assert len(calls) == 1
+        request = calls[0]
+        assert isinstance(request, Request)
+        assert request.get_header("User-agent") == "Explicit/2.0"
+
+    def test_invalid_header_value_reported_as_error(self, monkeypatch):
+        # Real urllib rejects header values containing newlines while sending
+        # the request. Simulate that ValueError and verify the tool surfaces it
+        # as an error string rather than letting it propagate.
+        monkeypatch.setenv("MINUTUS_READ_URL_USER_AGENT", "bad\nagent")
+
+        def _raising_urlopen(url, timeout=10):
+            raise ValueError("Invalid header value")
+
+        monkeypatch.setattr(minutus_mod, "urlopen", _raising_urlopen)
+
+        tool = create_read_url_tool()
+        result = tool.invoke({"url": "https://example.com/page"})
+
+        assert result.startswith("Failed to process URL:")

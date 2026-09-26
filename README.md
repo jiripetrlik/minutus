@@ -469,6 +469,7 @@ final response, the command is considered successful.
 |---|---|
 | `MINUTUS_OPENAI_API_KEY` | API key for the LLM (used if neither key option is provided) |
 | `MINUTUS_OPENAI_BASE_URL` | Base URL for the LLM API (used if `--base-url` is not provided) |
+| `MINUTUS_READ_URL_USER_AGENT` | Optional `User-Agent` header sent by the `read_url` tool; when unset the client library's built-in value is used |
 
 ## Docker
 

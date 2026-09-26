@@ -23,7 +23,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware
 from langchain.agents import AgentState
 from langchain_mcp_adapters.tools import load_mcp_tools
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from io import BytesIO
 import html2text
@@ -1110,8 +1110,21 @@ def create_shell_command_tool(
 run_shell_command = create_shell_command_tool()
 
 
-def create_read_url_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
-    """Create the URL reader with a model-facing line limit."""
+def create_read_url_tool(
+    max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
+    user_agent: Optional[str] = None,
+):
+    """Create the URL reader with a model-facing line limit.
+
+    ``user_agent`` overrides the ``User-Agent`` header sent with requests. When
+    it is not provided, the ``MINUTUS_READ_URL_USER_AGENT`` environment variable
+    is used instead; when neither is set the tool keeps its default behavior and
+    lets the client library send its built-in ``User-Agent``.
+    """
+    resolved_user_agent = (user_agent or "").strip() or os.getenv(
+        "MINUTUS_READ_URL_USER_AGENT", ""
+    ).strip()
+
     @tool("read_url")
     def configured_read_url(url: str) -> str:
         """Read content from a URL.
@@ -1120,7 +1133,12 @@ def create_read_url_tool(max_input_lines: int = DEFAULT_MAX_INPUT_LINES):
             url: The full URL to read content from.
         """
         try:
-            with urlopen(url, timeout=10) as response:
+            if resolved_user_agent:
+                request = Request(url, headers={"User-Agent": resolved_user_agent})
+                stream = urlopen(request, timeout=10)
+            else:
+                stream = urlopen(url, timeout=10)
+            with stream as response:
                 content_bytes = response.read()
                 content_type = response.headers.get("Content-Type", "")
 
