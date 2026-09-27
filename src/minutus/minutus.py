@@ -1857,7 +1857,7 @@ async def stream_response(
 @app.command()
 @cli_error_boundary
 async def chat(
-    model_name: str = typer.Option("gpt-5.6-terra", help="Name of the LLM model to use"),
+    model_name: str = typer.Option("gpt-6-sol", help="Name of the LLM model to use"),
     api_key: str = typer.Option(None, help="API key for ChatOpenAI"),
     api_key_file: str = typer.Option(
         None,

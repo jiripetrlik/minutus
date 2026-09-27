@@ -51,9 +51,9 @@ def openai_base_url():
 def model_name():
     """
     Provide the model name for testing.
-    Falls back to 'gpt-5.6-luna' if MINUTUS_TESTS_MODEL_NAME is not set.
+    Falls back to 'gpt-6-luna' if MINUTUS_TESTS_MODEL_NAME is not set.
     """
-    return os.getenv("MINUTUS_TESTS_MODEL_NAME", "gpt-5.6-luna")
+    return os.getenv("MINUTUS_TESTS_MODEL_NAME", "gpt-6-luna")
 
 
 @pytest.fixture

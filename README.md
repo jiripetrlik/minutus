@@ -124,19 +124,19 @@ history or process listings.
 ### Interactive Mode
 
 ```bash
-minutus --model-name gpt-5.6-terra
+minutus --model-name gpt-6-sol
 ```
 
 ### Single Query Mode
 
 ```bash
-minutus --model-name gpt-5.6-terra --prompt "What is 2+2?"
+minutus --model-name gpt-6-sol --prompt "What is 2+2?"
 ```
 
 ### With File Context
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --files ./README.md \
   --prompt "Summarize this file"
 ```
@@ -144,7 +144,7 @@ minutus --model-name gpt-5.6-terra \
 ### With Image (Vision)
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --image ./screenshot.png \
   --prompt "Describe what's in this image"
 ```
@@ -152,7 +152,7 @@ minutus --model-name gpt-5.6-terra \
 ### With Clipboard Context
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --clipboard \
   --prompt "Explain the code in my clipboard"
 ```
@@ -181,12 +181,12 @@ the model provider receiving this data.
 
 ```bash
 # Read-only tools (list_files, read_file, search_files)
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --read-only-workspace-tools \
   --prompt "List all Python files in this directory"
 
 # Read-write tools (adds write_file, edit_file, append_file, delete_path)
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --read-write-workspace-tools \
   --prompt "Create a new file called hello.py"
 ```
@@ -204,7 +204,7 @@ directory with any content is refused and nothing is ever deleted recursively.
 > inside an isolated environment.
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --use-shell-command-tool \
   --shell-command-timeout 30 \
   --prompt "Check the disk usage of this system"
@@ -223,7 +223,7 @@ shell commands are not confined to that directory.
 > injection; it may also be transmitted to the configured model provider.
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --use-read-url-tool \
   --prompt "Summarize https://example.com"
 ```
@@ -239,7 +239,7 @@ minutus --model-name gpt-5.6-terra \
 > otherwise run Minutus in an isolated environment.
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --mcp-config-json ./mcp-config.json \
   --prompt "What time is it?"
 ```
@@ -265,13 +265,13 @@ Example MCP config file (`mcp-config.json`) using the [time server](https://pypi
 
 ```bash
 # Auto-run specific tools (no confirmation needed)
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --read-only-workspace-tools \
   --auto-run-tools list_files read_file \
   --prompt "Find all TODO comments in this project"
 
 # Auto-run all tools
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --read-only-workspace-tools \
   --auto-run-all-tools \
   --prompt "Find all TODO comments in this project"
@@ -297,7 +297,7 @@ what it could not do.
 ### Non-Interactive Execution
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --read-only-workspace-tools \
   --auto-run-tools list_files \
   --non-interactive \
@@ -407,7 +407,7 @@ minutus --read-write-workspace-tools --no-ignore-files \
 Provider-native structured output is used by default:
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --prompt "What is 2+2?" \
   --structured-output ./schema.json
 ```
@@ -416,7 +416,7 @@ Use the tool-calling strategy for models that support tool calling but not
 provider-native JSON Schema output:
 
 ```bash
-minutus --model-name gpt-5.6-terra \
+minutus --model-name gpt-6-sol \
   --prompt "What is 2+2?" \
   --structured-output ./schema.json \
   --structured-output-strategy tool
@@ -434,7 +434,7 @@ Minutus uses the OpenAI-compatible API format. The following options are availab
 
 | Option | Description | Default |
 |---|---|---|
-| `--model-name` | Name of the LLM model to use | `gpt-5.6-terra` |
+| `--model-name` | Name of the LLM model to use | `gpt-6-sol` |
 | `--api-key` | API key (or set `MINUTUS_OPENAI_API_KEY`) | — |
 | `--api-key-file` | Read the API key from a UTF-8 file | — |
 | `--base-url` | Base URL for the LLM API (or set `MINUTUS_OPENAI_BASE_URL`) | — |
@@ -620,7 +620,7 @@ uv run pytest tests/
 |---|---|
 | `MINUTUS_OPENAI_API_KEY` | API key for the LLM (required) |
 | `MINUTUS_OPENAI_BASE_URL` | Base URL for the LLM API (optional, for non-default endpoints) |
-| `MINUTUS_TESTS_MODEL_NAME` | Model name override (optional, defaults to `gpt-5.6-luna`) |
+| `MINUTUS_TESTS_MODEL_NAME` | Model name override (optional, defaults to `gpt-6-luna`) |
 
 ### Project Structure
 
