@@ -1574,10 +1574,71 @@ def create_append_file_tool(respect_ignore_files: bool = True):
     return configured_append_file
 
 
+def create_delete_path_tool(respect_ignore_files: bool = True):
+    ignore = get_workspace_ignore(respect_ignore_files)
+
+    @tool("delete_path")
+    def configured_delete_path(path: str) -> str:
+        """Deletes a single file or a single empty directory.
+
+        Directories are removed only when they are empty; a directory that
+        contains anything (including only ignored entries) is refused, and
+        nothing is ever removed recursively. Paths excluded by .gitignore or
+        .aiignore are refused, as are paths that resolve outside the workspace
+        and the workspace root itself.
+
+        Paths are resolved (expanding ``..``, ``~``, and symlinks) before the
+        deletion target is chosen, so a symlink that points outside the
+        workspace is refused and a symlink to an in-workspace target deletes
+        the target rather than the link.
+        """
+        try:
+            safe_path = get_safe_path(path)
+        except ValueError as e:
+            return str(e)
+
+        if safe_path == TRUSTED_ROOT:
+            return "Error: Refusing to delete the workspace root."
+
+        if not safe_path.exists():
+            return f"Error: Path '{path}' does not exist."
+
+        is_dir = safe_path.is_dir()
+        ignored_error = ensure_not_ignored(
+            safe_path, path, ignore, is_dir=is_dir
+        )
+        if ignored_error is not None:
+            return ignored_error
+
+        if is_dir:
+            try:
+                if next(safe_path.iterdir(), None) is not None:
+                    return (
+                        f"Error: Directory '{path}' is not empty; only empty "
+                        "directories can be deleted."
+                    )
+            except OSError as e:
+                return f"Error: Failed to inspect directory '{path}': {e}"
+            try:
+                safe_path.rmdir()
+            except OSError as e:
+                return f"Error: Failed to delete directory '{path}': {e}"
+            return f"Successfully deleted empty directory {path}."
+
+        try:
+            safe_path.unlink()
+        except OSError as e:
+            return f"Error: Failed to delete file '{path}': {e}"
+        return f"Successfully deleted file {path}."
+
+    return configured_delete_path
+
+
 # Retain importable default tools for library users and backwards compatibility.
 write_file = create_write_file_tool()
 edit_file = create_edit_file_tool()
 append_file = create_append_file_tool()
+delete_path = create_delete_path_tool()
 
 
 def prepare_message_content(
@@ -1834,8 +1895,8 @@ async def chat(
         False,
         help=(
             "Enable read-write workspace tools (list_files, read_file, search_files, "
-            "write_file, edit_file, append_file); includes read-only mode and takes "
-            "precedence if both workspace flags are supplied"
+            "write_file, edit_file, append_file, delete_path); includes read-only mode "
+            "and takes precedence if both workspace flags are supplied"
         ),
     ),
     respect_ignore_files: bool = typer.Option(
@@ -1959,6 +2020,7 @@ async def chat(
                     create_write_file_tool(respect_ignore_files),
                     create_edit_file_tool(respect_ignore_files),
                     create_append_file_tool(respect_ignore_files),
+                    create_delete_path_tool(respect_ignore_files),
                 ]
             )
         elif read_only_workspace_tools:

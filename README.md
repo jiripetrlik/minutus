@@ -161,10 +161,10 @@ minutus --model-name gpt-5.6-terra \
 
 The built-in workspace file tools restrict requested paths to the process's
 initial working directory. This applies only to `list_files`, `read_file`,
-`search_files`, `write_file`, `edit_file`, and `append_file`. Paths explicitly
-provided through CLI options—such as `--files`, `--image`, `--prompt-file`,
-`--system-prompt-file`, `--structured-output`, `--api-key-file`, and
-`--mcp-config-json`—are user-authorized paths and may point outside the
+`search_files`, `write_file`, `edit_file`, `append_file`, and `delete_path`.
+Paths explicitly provided through CLI options—such as `--files`, `--image`,
+`--prompt-file`, `--system-prompt-file`, `--structured-output`, `--api-key-file`,
+and `--mcp-config-json`—are user-authorized paths and may point outside the
 workspace.
 
 This path validation is a defense-in-depth guard against ordinary path
@@ -185,7 +185,7 @@ minutus --model-name gpt-5.6-terra \
   --read-only-workspace-tools \
   --prompt "List all Python files in this directory"
 
-# Read-write tools (adds write_file, edit_file, append_file)
+# Read-write tools (adds write_file, edit_file, append_file, delete_path)
 minutus --model-name gpt-5.6-terra \
   --read-write-workspace-tools \
   --prompt "Create a new file called hello.py"
@@ -193,7 +193,8 @@ minutus --model-name gpt-5.6-terra \
 
 Read-write mode includes all read-only workspace tools. If both workspace flags
 are supplied, read-write mode takes precedence and each tool is enabled only
-once.
+once. `delete_path` removes a single file or a single empty directory; a
+directory with any content is refused and nothing is ever deleted recursively.
 
 ### With Shell Command Tool
 
@@ -364,8 +365,9 @@ before its model-facing text is truncated.
 
 By default, the workspace tools honor `.gitignore` and `.aiignore` files. Rules
 apply to `list_files`, `read_file`, `search_files`, `write_file`, `edit_file`,
-and `append_file` only; shell commands, URL fetching, MCP servers, and paths
-passed to CLI options such as `--files` are user-authorized and are unaffected.
+`append_file`, and `delete_path` only; shell commands, URL fetching, MCP servers,
+and paths passed to CLI options such as `--files` are user-authorized and are
+unaffected.
 
 - Both files use gitignore pattern syntax (`!` negation, anchoring, `**`, and
   directory-only `dir/` patterns are supported).
@@ -374,9 +376,12 @@ passed to CLI options such as `--files` are user-authorized and are unaffected.
   `.gitignore` is read before `.aiignore`, so `.aiignore` can add rules or
   re-include (with `!`) paths ignored by `.gitignore`.
 - `list_files` and `search_files` silently skip ignored paths. `read_file`,
-  `write_file`, `edit_file`, and `append_file` refuse an ignored path with an
-  error naming the ignore file that matched. `write_file` also refuses targets
-  whose missing parent directory would be created inside an ignored tree.
+  `write_file`, `edit_file`, `append_file`, and `delete_path` refuse an ignored
+  path with an error naming the ignore file that matched. `write_file` also
+  refuses targets whose missing parent directory would be created inside an
+  ignored tree. `delete_path` refuses an ignored file or directory, and refuses
+  to delete any directory that contains content—including a directory whose only
+  contents are ignored entries.
 - A file re-included with `!` inside an ignored directory is not discovered by
   `list_files` or `search_files`, because the directory itself is pruned during
   traversal.
@@ -442,7 +447,7 @@ Minutus uses the OpenAI-compatible API format. The following options are availab
 | `--use-shell-command-tool` | Enable shell command tool | `False` |
 | `--use-read-url-tool` | Enable URL reading tool | `False` |
 | `--read-only-workspace-tools` | Enable read-only file tools | `False` |
-| `--read-write-workspace-tools` | Enable read-write file tools | `False` |
+| `--read-write-workspace-tools` | Enable read-write file tools (adds `write_file`, `edit_file`, `append_file`, and `delete_path`) | `False` |
 | `--respect-ignore-files` / `--no-ignore-files` | Honor `.gitignore` and `.aiignore` in the workspace tools | `True` |
 | `--auto-run-tools` | Enabled tool names that run without confirmation; unknown names are errors (can be repeated) | — |
 | `--auto-run-all-tools` | All tools run without confirmation | `False` |

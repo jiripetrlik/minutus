@@ -2,7 +2,8 @@
 Unit tests for gitignore-style ignore-file support (.gitignore and .aiignore).
 
 Tests cover:
-  - read_file / edit_file / append_file / write_file refusal on ignored paths
+  - read_file / edit_file / append_file / write_file / delete_path refusal on
+    ignored paths
   - write_file refusal for ignored parent directories
   - list_files (recursive and flat) and search_files exclusion
   - negation (`!`), directory-only patterns, and nested ignore files
@@ -27,6 +28,7 @@ from minutus.minutus import (
     IGNORE_FILES,
     WorkspaceIgnore,
     create_append_file_tool,
+    create_delete_path_tool,
     create_edit_file_tool,
     create_list_files_tool,
     create_read_file_tool,
@@ -279,6 +281,54 @@ class TestWriteFile:
         result = tool.invoke({"path": "secret.txt", "content": "x"})
         assert "Successfully wrote" in result
         assert (trusted_root / "secret.txt").read_text() == "x"
+
+
+# ---------------------------------------------------------------------------
+# delete_path
+# ---------------------------------------------------------------------------
+
+class TestDeletePath:
+    def test_ignored_file_refused(self, trusted_root):
+        _write(trusted_root, ".gitignore", "secret.txt\n")
+        f = _write(trusted_root, "secret.txt", "data\n")
+        tool = create_delete_path_tool()
+        result = tool.invoke({"path": "secret.txt"})
+        assert "excluded by ignore rules" in result
+        assert ".gitignore" in result
+        assert f.exists()
+
+    def test_ignored_directory_refused(self, trusted_root):
+        _write(trusted_root, ".gitignore", "dist/\n")
+        d = trusted_root / "dist"
+        d.mkdir()
+        tool = create_delete_path_tool()
+        result = tool.invoke({"path": "dist"})
+        assert "excluded by ignore rules" in result
+        assert d.exists()
+
+    def test_nested_ignore_scoped(self, trusted_root):
+        _write(trusted_root, "sub/.gitignore", "local.txt\n")
+        f = _write(trusted_root, "sub/local.txt", "data\n")
+        tool = create_delete_path_tool()
+        result = tool.invoke({"path": "sub/local.txt"})
+        assert "excluded by ignore rules" in result
+        assert f.exists()
+
+    def test_disabled_deletes_ignored_file(self, trusted_root):
+        _write(trusted_root, ".gitignore", "secret.txt\n")
+        f = _write(trusted_root, "secret.txt", "data\n")
+        tool = create_delete_path_tool(respect_ignore_files=False)
+        result = tool.invoke({"path": "secret.txt"})
+        assert "Successfully deleted file" in result
+        assert not f.exists()
+
+    def test_non_ignored_file_deleted(self, trusted_root):
+        _write(trusted_root, ".gitignore", "secret.txt\n")
+        f = _write(trusted_root, "public.txt", "data\n")
+        tool = create_delete_path_tool()
+        result = tool.invoke({"path": "public.txt"})
+        assert "Successfully deleted file" in result
+        assert not f.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -140,3 +140,49 @@ async def test_print_tool_names_remains_discovery_only(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == "Available tools: list_files, read_file, search_files\n"
     assert captured.err == ""
+
+
+@pytest.mark.asyncio
+async def test_print_tool_names_read_write_includes_delete_path(monkeypatch, capsys):
+    def unexpected_creation(*args, **kwargs):
+        pytest.fail("discovery-only mode attempted to create a model or agent")
+
+    monkeypatch.setattr(minutus, "ChatOpenAI", unexpected_creation)
+    monkeypatch.setattr(minutus, "create_agent", unexpected_creation)
+
+    await minutus.chat(
+        model_name="unused",
+        api_key=None,
+        api_key_file=None,
+        base_url=None,
+        files=[],
+        image=None,
+        system_prompt="",
+        prompt=None,
+        prompt_file=None,
+        system_prompt_file=None,
+        mcp_config_json=None,
+        print_tool_names=True,
+        auto_run_tools=[],
+        auto_run_all_tools=False,
+        non_interactive=False,
+        temperature=None,
+        structured_output=None,
+        structured_output_strategy=minutus.StructuredOutputStrategy.provider,
+        clipboard=False,
+        max_input_lines=minutus.DEFAULT_MAX_INPUT_LINES,
+        summarization_context_size=None,
+        use_shell_command_tool=False,
+        shell_command_timeout=30.0,
+        use_read_url_tool=False,
+        read_only_workspace_tools=False,
+        read_write_workspace_tools=True,
+        debug=False,
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == (
+        "Available tools: list_files, read_file, search_files, write_file, "
+        "edit_file, append_file, delete_path\n"
+    )
+    assert captured.err == ""
