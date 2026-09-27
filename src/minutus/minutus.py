@@ -17,6 +17,7 @@ from langchain.tools import ToolException
 from langchain.tools.tool_node import ToolCallRequest
 from langgraph.types import Command
 from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core._api import suppress_langchain_beta_warning
 from langchain_core.runnables import RunnableConfig
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -1734,9 +1735,15 @@ async def stream_response(
         async def _do_stream():
             attempt_text: list[str] = []
             final_text: Optional[str] = None
-            stream = await agent.astream_events(
-                agent_input, version="v3", config=runnable_config
-            )
+            # v3 event streaming (astream_events/_apregel_stream_v3 and
+            # AsyncGraphRunStream) is still marked beta by LangGraph, which
+            # emits a LangChainBetaWarning for each. These are expected in
+            # this usage, so suppress them rather than leaking noise to the
+            # user.
+            with suppress_langchain_beta_warning():
+                stream = await agent.astream_events(
+                    agent_input, version="v3", config=runnable_config
+                )
             async for message in stream.messages:
                 message_text: list[str] = []
                 has_tool_calls = False
