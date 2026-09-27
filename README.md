@@ -324,7 +324,11 @@ Single-query output follows a script-friendly stream contract:
   explicitly requested data such as `--print-tool-names`.
 - **stderr** contains retries, tool progress, approval UI, warnings, and other
   diagnostics. When a tool begins execution, Minutus writes
-  `Running tool: [tool-name]` to stderr.
+  `Running tool: [tool-name](arguments)` to stderr. Arguments are shown as a
+  compact single line so an entry stays readable in a log: each value is
+  truncated to 40 characters and marked with `…` when clipped, while keys are
+  shown in full. Multiline values such as file contents are collapsed onto the
+  same line.
 
 One-shot responses are buffered until an attempt succeeds, so a failed stream
 cannot leave a partial answer on stdout. Text produced before a tool call is

@@ -128,6 +128,10 @@ IGNORE_FILES = (".gitignore", ".aiignore")
 
 DEFAULT_MAX_INPUT_LINES = 5000
 
+# Maximum characters shown per tool-call argument value in the compact
+# "Running tool:" progress line. Keys are always shown in full.
+TOOL_ARGUMENT_PREVIEW_CHARS = 40
+
 
 class WorkspaceIgnore:
     """Evaluates gitignore-style ignore files for the workspace tools.
@@ -444,8 +448,10 @@ class ToolRunningMiddleware(AgentMiddleware):
     """Report each tool immediately before its handler begins execution."""
 
     @staticmethod
-    def _tool_name(request: ToolCallRequest) -> str:
-        return str(request.tool_call.get("name", "unknown"))
+    def _tool_description(request: ToolCallRequest) -> str:
+        name = str(request.tool_call.get("name", "unknown"))
+        arguments = summarize_tool_arguments(request.tool_call.get("args"))
+        return f"{name}{arguments}"
 
     def wrap_tool_call(
         self,
@@ -453,7 +459,9 @@ class ToolRunningMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
         """Report and execute a synchronous tool call."""
-        write_diagnostic(f"Running tool: {self._tool_name(request)}", flush=True)
+        write_diagnostic(
+            f"Running tool: {self._tool_description(request)}", flush=True
+        )
         return handler(request)
 
     async def awrap_tool_call(
@@ -462,7 +470,9 @@ class ToolRunningMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
         """Report and execute an asynchronous tool call."""
-        write_diagnostic(f"Running tool: {self._tool_name(request)}", flush=True)
+        write_diagnostic(
+            f"Running tool: {self._tool_description(request)}", flush=True
+        )
         return await handler(request)
 
 
@@ -552,6 +562,61 @@ def format_tool_arguments(arguments: Any) -> str:
         return json.dumps(arguments, indent=2, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return str(arguments)
+
+
+def _preview_value(
+    value: Any, max_chars: int = TOOL_ARGUMENT_PREVIEW_CHARS
+) -> str:
+    """Render one argument value as a single-line, length-capped preview.
+
+    Strings are quoted and other values are rendered as JSON tokens
+    (``true``, ``null``, ``10``), matching ``format_tool_arguments``.
+    """
+    if isinstance(value, str):
+        text = value
+        quoted = True
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+        quoted = False
+
+    # Collapse every run of whitespace so multiline values such as file
+    # contents or shell commands cannot break the single-line output.
+    text = " ".join(text.split())
+    if len(text) > max_chars:
+        text = f"{text[:max_chars]}\u2026"
+
+    return f'"{text}"' if quoted else text
+
+
+def summarize_tool_arguments(
+    arguments: Any, max_chars: int = TOOL_ARGUMENT_PREVIEW_CHARS
+) -> str:
+    """Return a compact, single-line preview of tool-call arguments.
+
+    String and JSON-string arguments are normalized the same way as
+    ``format_tool_arguments``. Every value is truncated to ``max_chars``
+    characters, while keys are always shown in full, so one tool call stays on
+    one readable diagnostics line. The result always starts with ``(``.
+    """
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if not isinstance(arguments, dict):
+        if arguments is None or arguments == "":
+            return "()"
+        return f"({_preview_value(arguments, max_chars)})"
+
+    parts = [
+        f"{key}={_preview_value(value, max_chars)}"
+        for key, value in arguments.items()
+    ]
+    return f"({', '.join(parts)})"
 
 
 def wrap_approval_prompt(prompt: str, width: Optional[int] = None) -> str:
