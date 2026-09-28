@@ -27,7 +27,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from io import BytesIO
-import html2text
+from markdownify import MarkdownConverter
 from html import escape
 import pypdf
 import os
@@ -109,10 +109,9 @@ async def retry_with_backoff(
             attempt += 1
 
 
-# Initialize html2text converter once to reuse settings
-_converter = html2text.HTML2Text()
-_converter.ignore_links = False  # Keep links if needed, or set to True to ignore
-_converter.ignore_images = True
+# Initialize markdownify converter once to reuse settings. The default options
+# are used, so images become Markdown images and links are preserved.
+_converter = MarkdownConverter()
 
 # 1. Establish the Trusted Root (Current working directory, fully resolved)
 TRUSTED_ROOT = Path.cwd().resolve()
@@ -911,7 +910,7 @@ def detect_document_type(
 
     # Also recognize HTML saved without an HTML extension.  Keep this
     # deliberately conservative so ordinary source/text files are not routed
-    # through html2text merely because they contain angle brackets.
+    # through the HTML converter merely because they contain angle brackets.
     try:
         text_start = content_bytes.decode("utf-8").lstrip()[:512].lower()
         if (
@@ -954,7 +953,7 @@ def parse_document(
     if document_type == "html":
         try:
             html_content = content_bytes.decode("utf-8")
-            return _converter.handle(html_content)
+            return _converter.convert(html_content)
         except Exception as e:
             raise DocumentParseError(f"Failed to convert HTML: {e}") from e
 
@@ -968,7 +967,7 @@ def load_files_context(
     Loads content from multiple files and formats it as context for AI.
 
     PDF files are parsed with pypdf and HTML files are converted with the
-    shared html2text converter. Other files are decoded as UTF-8 text.
+    shared markdownify converter. Other files are decoded as UTF-8 text.
 
     Args:
         file_paths (list): List of file paths as strings
