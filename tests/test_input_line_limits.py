@@ -87,5 +87,5 @@ def test_list_files_uses_configured_limit(trusted_root):
     assert "showing first 2 of 3 lines" in result
 
 
-def test_default_limit_is_5000():
-    assert minutus.DEFAULT_MAX_INPUT_LINES == 5000
+def test_default_limit_is_500():
+    assert minutus.DEFAULT_MAX_INPUT_LINES == 500

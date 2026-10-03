@@ -125,7 +125,7 @@ IGNORE_DIRS = {".git", "node_modules", "__pycache__", "venv", ".venv", "dist", "
 # ".aiignore" can add rules or re-include ("!") paths ignored by ".gitignore".
 IGNORE_FILES = (".gitignore", ".aiignore")
 
-DEFAULT_MAX_INPUT_LINES = 5000
+DEFAULT_MAX_INPUT_LINES = 500
 
 # Maximum characters shown per tool-call argument value in the compact
 # "Running tool:" progress line. Keys are always shown in full.

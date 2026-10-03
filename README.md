@@ -352,13 +352,13 @@ continue to use stdout.
 
 `--max-input-lines` limits each loaded file, prompt file or stdin prompt,
 clipboard value, URL result, and read-only workspace-tool result independently.
-The default is 5,000 lines. These inputs retain their first lines; shell-command
+The default is 500 lines. These inputs retain their first lines; shell-command
 output retains its last lines so errors and summaries at the end remain visible.
 Existing fixed limits in `list_files`, `read_file`, and `search_files` are
 replaced by this option.
 
 ```bash
-minutus --max-input-lines 5000 --files large.log \
+minutus --max-input-lines 500 --files large.log \
   --use-shell-command-tool --prompt "Investigate this log"
 ```
 
@@ -446,7 +446,7 @@ Minutus uses the OpenAI-compatible API format. The following options are availab
 | `--files` | Files to include as context (can be repeated) | — |
 | `--image` | Path to image file for vision | — |
 | `--clipboard` | Enable clipboard context loading | `False` |
-| `--max-input-lines` | Maximum lines retained per input source or tool result; regular inputs keep the first lines and shell output keeps the last lines | `5000` |
+| `--max-input-lines` | Maximum lines retained per input source or tool result; regular inputs keep the first lines and shell output keeps the last lines | `500` |
 | `--mcp-config-json` | Load an MCP configuration; `stdio` entries execute local commands during discovery, so use only trusted configurations | — |
 | `--use-shell-command-tool` | Enable shell command tool | `False` |
 | `--use-read-url-tool` | Enable URL reading tool | `False` |
