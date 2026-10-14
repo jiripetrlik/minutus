@@ -1549,18 +1549,31 @@ def create_edit_file_tool(respect_ignore_files: bool = True):
     def configured_edit_file(path: str, old_string: str, new_string: str) -> str:
         """Edits a file by replacing an exact, unique string with a new string.
 
-        This is a literal, byte-for-byte replacement. The tool performs NO escape
-        processing: the characters in old_string/new_string are written exactly as
-        given. In particular, the two characters backslash+n are written as
-        backslash+n, not as a newline; conversely a real newline in the argument is
-        written as a real newline. When editing formats that store escapes literally
-        (e.g. JSON or Jupyter notebooks, where a newline inside a string is the two
-        characters \\n), escaping is entirely the caller's responsibility.
+        The replacement is literal and byte-for-byte. This tool performs NO escape
+        processing of its own: the characters passed in old_string/new_string are
+        written exactly as given. In particular, the two characters backslash+n are
+        written as backslash+n rather than as a newline, and a real newline is
+        written as a real newline. When the target file stores escapes literally
+        (e.g. JSON or Jupyter notebook source, where a newline inside a string is the
+        two characters \\n), producing the correct escaping is entirely the caller's
+        responsibility.
 
-        old_string must be an exact, unique substring of the file. If it is absent
-        you get "old_string not found"; if it occurs more than once you get a
-        non-unique error. Copy old_string verbatim from read_file output (which
-        preserves trailing whitespace) to avoid mismatches.
+        old_string must be an exact substring of the file and must occur exactly
+        once. If it is absent the tool returns "old_string not found"; if it occurs
+        more than once it returns a non-unique error. Copy old_string verbatim from
+        read_file output to avoid mismatches: trailing spaces and tabs are real bytes
+        and are significant.
+
+        Line endings are preserved verbatim: editing a file that uses CRLF (or
+        bare CR) leaves every other line ending in the file untouched, on every
+        platform. Matching is equally strict, so old_string must contain the
+        file's actual line-ending bytes. A CRLF file ends each line with a real
+        carriage return (0x0D) immediately followed by the newline (0x0A);
+        supplying a lone LF (0x0A) where the file has CRLF will NOT match and
+        will report "old_string not found". Tool arguments arrive already
+        JSON-decoded, so a line ending in old_string is those real bytes, not a
+        backslash-r escape; escaping the carriage return a second time leaves
+        literal backslashes that cannot match.
 
         This tool does not validate the file format. It reports success once the
         substitution is written, even if the result is no longer valid JSON/HTML/etc.
@@ -1581,7 +1594,11 @@ def create_edit_file_tool(respect_ignore_files: bool = True):
         if ignored_error is not None:
             return ignored_error
 
-        with open(safe_path, "r", encoding="utf-8") as f:
+        # newline="" disables universal-newline translation, so ``content`` is a
+        # byte-exact (decoded) view of the file: CRLF and bare CR line endings are
+        # preserved rather than folded to "\n". This is required for the promised
+        # byte-for-byte matching semantics.
+        with open(safe_path, "r", encoding="utf-8", newline="") as f:
             content = f.read()
 
         count = content.count(old_string)
@@ -1590,8 +1607,12 @@ def create_edit_file_tool(respect_ignore_files: bool = True):
         if count > 1:
             return f"Error: old_string is not unique (found {count} times). Provide more surrounding lines to make it unique."
 
+        # newline="" also disables output translation (no "\n" -> os.linesep), so
+        # every line ending in the file is written back exactly as it was read on
+        # all platforms. Without this, editing one line of a CRLF file would
+        # rewrite every line ending in the file.
         new_content = content.replace(old_string, new_string)
-        with open(safe_path, "w", encoding="utf-8") as f:
+        with open(safe_path, "w", encoding="utf-8", newline="") as f:
             f.write(new_content)
 
         return f"Successfully edited {path}."

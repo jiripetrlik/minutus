@@ -71,6 +71,7 @@ endpoint options.
 - **Built-in Tools** — File system operations (read, write, edit, search), shell command execution, and URL fetching
   - `search_files` treats the query as a regular expression by default; pass `regex=false` (or escape metacharacters) to match a literal string
   - `edit_file` and `write_file` write content literally and perform no escape processing — escaping is the caller's responsibility
+  - `edit_file` preserves existing line endings exactly (a CRLF file keeps CRLF), so `old_string` must match the on-disk line endings
   - `read_file` returns one numbered line per physical line and preserves trailing whitespace (pass `show_whitespace=true` to make it visible)
 - **MCP Integration** — Connect to external MCP servers for extended tool capabilities
 - **Human-in-the-Loop Approval** — Approve or reject tool calls before execution; only tools that require review are surfaced, and auto-run tools execute in the same turn

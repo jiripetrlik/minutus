@@ -208,3 +208,87 @@ class TestLiteralReplacement:
         })
         assert result == "Successfully edited file.txt."
         assert f.read_text() == "keep\ndrop\n"
+
+
+# ---------------------------------------------------------------------------
+# Line-ending preservation (CRLF / bare CR)
+# ---------------------------------------------------------------------------
+#
+# These tests use write_bytes/read_bytes deliberately: Path.write_text and
+# Path.read_text apply universal-newline translation themselves, which would
+# mask the very behavior under test.
+
+class TestLineEndingPreservation:
+    """edit_file is byte-exact about line endings and never rewrites them."""
+
+    def test_crlf_preserved_outside_the_edit(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_bytes(b"line1\r\nline2\r\n")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "line1",
+            "new_string": "LINE1",
+        })
+        assert result == "Successfully edited file.txt."
+        # The untouched line must keep CRLF; previously the whole file became LF.
+        assert f.read_bytes() == b"LINE1\r\nline2\r\n"
+
+    def test_crlf_old_string_matches(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "line1\r\nline2",
+            "new_string": "replaced1\r\nreplaced2",
+        })
+        assert result == "Successfully edited file.txt."
+        assert f.read_bytes() == b"replaced1\r\nreplaced2\r\nline3\r\n"
+
+    def test_lf_only_file_still_uses_lf(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_bytes(b"a\nb\n")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "a",
+            "new_string": "A",
+        })
+        assert result == "Successfully edited file.txt."
+        assert f.read_bytes() == b"A\nb\n"
+
+    def test_mixed_line_endings_preserved(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_bytes(b"a\r\nb\nc\r\n")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "b",
+            "new_string": "B",
+        })
+        assert result == "Successfully edited file.txt."
+        # Each surrounding line keeps its own ending.
+        assert f.read_bytes() == b"a\r\nB\nc\r\n"
+
+    def test_bare_cr_preserved(self, trusted_root):
+        f = trusted_root / "file.txt"
+        f.write_bytes(b"a\rb\r")
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "a",
+            "new_string": "A",
+        })
+        assert result == "Successfully edited file.txt."
+        # Bare CR is no longer folded to "\n".
+        assert f.read_bytes() == b"A\rb\r"
+
+    def test_lf_old_string_does_not_match_crlf_file(self, trusted_root):
+        """Option A semantics: old_string must match on-disk line endings."""
+        f = trusted_root / "file.txt"
+        original = b"line1\r\nline2\r\n"
+        f.write_bytes(original)
+        result = edit_file.invoke({
+            "path": "file.txt",
+            "old_string": "line1\nline2",
+            "new_string": "replaced",
+        })
+        assert "Error: old_string not found in file.txt." in result
+        # The file must be left completely untouched.
+        assert f.read_bytes() == original
