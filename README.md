@@ -75,7 +75,7 @@ endpoint options.
   - `read_file` returns one numbered line per physical line and preserves trailing whitespace (pass `show_whitespace=true` to make it visible)
 - **MCP Integration** — Connect to external MCP servers for extended tool capabilities
 - **Human-in-the-Loop Approval** — Approve or reject tool calls before execution; only tools that require review are surfaced, and auto-run tools execute in the same turn
-- **Workspace Path Containment** — Built-in workspace file tools restrict paths to the working directory captured when Minutus starts; explicitly supplied CLI paths and other tools are not sandboxed
+- **Workspace Path Containment** — Built-in workspace file tools restrict paths to the working directory captured when Minutus starts; additional directory trees can be opted in explicitly with `--allow-path`; explicitly supplied CLI paths and other tools are not sandboxed
 - **Conversation Summarization** — Automatically summarizes long conversations to manage context limits
 - **Structured Output** — Supports JSON schema-based structured output for programmatic use
 - **Streaming Responses** — Interactive responses stream in real time; one-shot responses are buffered for atomic stdout output
@@ -161,8 +161,9 @@ minutus --model-name gpt-6-sol \
 ### With Workspace Tools
 
 The built-in workspace file tools restrict requested paths to the process's
-initial working directory. This applies only to `list_files`, `read_file`,
-`search_files`, `write_file`, `edit_file`, `append_file`, and `delete_path`.
+initial working directory, plus any trees added with `--allow-path`. This
+applies only to `list_files`, `read_file`, `search_files`, `write_file`,
+`edit_file`, `append_file`, and `delete_path`.
 Paths explicitly provided through CLI options—such as `--files`, `--image`,
 `--prompt-file`, `--system-prompt-file`, `--structured-output`, `--api-key-file`,
 and `--mcp-config-json`—are user-authorized paths and may point outside the
@@ -196,6 +197,57 @@ Read-write mode includes all read-only workspace tools. If both workspace flags
 are supplied, read-write mode takes precedence and each tool is enabled only
 once. `delete_path` removes a single file or a single empty directory; a
 directory with any content is refused and nothing is ever deleted recursively.
+
+### Allowing Additional Paths
+
+> **Warning:** `--allow-path` widens the workspace tools beyond the working
+> directory captured at startup. Every enabled workspace tool — including
+> `write_file`, `edit_file`, `append_file`, and `delete_path` in read-write mode
+> — can then read, modify, and delete files in the named trees. Combined with
+> `--auto-run-all-tools` or `--non-interactive`, those changes can happen with no
+> human review. Use it only with trees you intend the assistant to alter.
+
+By default the workspace tools are confined to the working directory. Pass
+`--allow-path DIR` to permit one additional directory tree:
+
+```bash
+minutus --model-name gpt-6-sol \
+  --read-write-workspace-tools \
+  --allow-path ../shared-lib \
+  --allow-path /srv/data \
+  --prompt "Update the shared library to match this project"
+```
+
+- The option is repeatable. Each value is resolved to an absolute real path at
+  startup, so a relative value resolves against the working directory and
+  `--allow-path subdir` of the workspace is redundant but harmless.
+- A value must exist and must be a directory; a missing path or a regular file is
+  an error. Repeating the same value is harmless, since duplicates are collapsed.
+- `--allow-path` requires `--read-only-workspace-tools` or
+  `--read-write-workspace-tools`; on its own it is an error rather than a
+  silently ignored flag.
+- Containment becomes a union: the workspace plus every allowed root. A path
+  outside all of them is still refused with the usual `Security Error`, and
+  `..` cannot climb back out of an allowed root.
+- A root that equals or contains the workspace is **rejected** at startup.
+  Allowing such a tree would make workspace containment meaningless.
+- Symlinks are still resolved to their real target before validation, so a link
+  inside the workspace is permitted only when its target lands in the workspace
+  or in an allowed root. An allowed root reached *through* a symlink is readable
+  and writable, because the check applies to the resolved target.
+- An allowed root itself is protected from deletion, just as the workspace root
+  is. A directory inside an allowed root is deleted only when empty, and nothing
+  is deleted recursively.
+- `search_files` reports matches from an allowed tree as absolute paths, because
+  a workspace-relative rendering would be a `../..` chain.
+- Ignore files do not govern allowed trees. `.gitignore` and `.aiignore` are
+  evaluated relative to the workspace root, so they have no authority outside it
+  — an allowed tree is never partially hidden by the workspace's ignore rules.
+
+Omitting `--allow-path` leaves behavior exactly as before: the tools are
+confined to the workspace and no additional tree is reachable. Allowed trees are
+trusted exactly as much as the workspace itself; this is a convenience for
+legitimate multi-tree work, not a sandbox boundary.
 
 ### With Shell Command Tool
 
@@ -387,6 +439,8 @@ unaffected.
   ignored tree. `delete_path` refuses an ignored file or directory, and refuses
   to delete any directory that contains content—including a directory whose only
   contents are ignored entries.
+- Ignore files govern the workspace only. Trees added with `--allow-path` are
+  outside the workspace root and are therefore not subject to these rules.
 - A file re-included with `!` inside an ignored directory is not discovered by
   `list_files` or `search_files`, because the directory itself is pruned during
   traversal.
@@ -454,6 +508,7 @@ Minutus uses the OpenAI-compatible API format. The following options are availab
 | `--read-only-workspace-tools` | Enable read-only file tools | `False` |
 | `--read-write-workspace-tools` | Enable read-write file tools (adds `write_file`, `edit_file`, `append_file`, and `delete_path`) | `False` |
 | `--respect-ignore-files` / `--no-ignore-files` | Honor `.gitignore` and `.aiignore` in the workspace tools | `True` |
+| `--allow-path` | Allow the workspace tools another directory tree; repeatable, must exist (can be repeated) | — |
 | `--auto-run-tools` | Enabled tool names that run without confirmation; unknown names are errors (can be repeated) | — |
 | `--auto-run-all-tools` | All tools run without confirmation | `False` |
 | `--non-interactive` | Never prompt; reject tool calls not explicitly authorized | `False` |

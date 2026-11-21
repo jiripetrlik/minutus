@@ -306,6 +306,71 @@ def ensure_not_ignored(
     )
 
 
+def display_path(path: Path) -> str:
+    """Render a path for tool output.
+
+    In-workspace paths are shown relative to the workspace root, exactly as
+    before. Paths in an ``--allow-path`` tree are shown as absolute paths,
+    because a relative rendering would be a ``../..`` chain that obscures where
+    the file actually is.
+    """
+    if path.is_relative_to(TRUSTED_ROOT):
+        return os.path.relpath(path, TRUSTED_ROOT)
+    return str(path)
+
+
+def resolve_allowed_paths(
+    raw_paths: list[str], workspace: Optional[Path] = None
+) -> tuple[Path, ...]:
+    """Resolve and validate ``--allow-path`` values.
+
+    Every value must exist and be a directory. A root that equals or contains
+    the workspace is rejected: permitting such a tree would make workspace
+    containment vacuous, which is never what the user means. Duplicates are
+    collapsed. An empty input yields an empty tuple, so the default position
+    stays exactly as strict as the historical behavior.
+    """
+    if not raw_paths:
+        return ()
+    root_workspace = workspace if workspace is not None else TRUSTED_ROOT
+    roots: list[Path] = []
+    for raw in raw_paths:
+        candidate = Path(raw).expanduser().resolve()
+        if not candidate.exists():
+            fail(f"Error: allow-path '{raw}' does not exist")
+        if not candidate.is_dir():
+            fail(f"Error: allow-path '{raw}' is not a directory")
+        if root_workspace.is_relative_to(candidate):
+            fail(
+                f"Error: allow-path '{raw}' contains the workspace, which would "
+                "make workspace containment ineffective"
+            )
+        if candidate not in roots:
+            roots.append(candidate)
+    return tuple(roots)
+
+
+def validate_allow_path_requires_workspace_tools(
+    allow_path: list[str],
+    read_only_workspace_tools: bool,
+    read_write_workspace_tools: bool,
+) -> None:
+    """Reject ``--allow-path`` when no workspace tool can use it.
+
+    The allow-list widens only the built-in workspace tools, so supplying it
+    with neither tool flag enabled would be silently ignored input. This
+    codebase rejects such input rather than discarding it.
+    """
+    if not allow_path:
+        return
+    if read_only_workspace_tools or read_write_workspace_tools:
+        return
+    fail(
+        "Error: allow-path requires --read-only-workspace-tools or "
+        "--read-write-workspace-tools"
+    )
+
+
 def validate_max_input_lines(max_input_lines: int) -> None:
     """Reject non-positive input line limits."""
     if max_input_lines <= 0:
@@ -1231,9 +1296,24 @@ def create_read_url_tool(
 read_url = create_read_url_tool()
 
 
-def get_safe_path(user_path: str) -> Path:
+def is_path_permitted(candidate: Path, allowed_roots: tuple[Path, ...] = ()) -> bool:
+    """Return whether a resolved path is inside the workspace or an allowed root.
+
+    The workspace is always permitted. Additional roots come from
+    ``--allow-path``. With an empty ``allowed_roots`` this is exactly the
+    historical containment check against ``TRUSTED_ROOT`` alone.
     """
-    Validates and resolves a path to ensure it stays within the TRUSTED_ROOT.
+    if candidate.is_relative_to(TRUSTED_ROOT):
+        return True
+    return any(candidate.is_relative_to(root) for root in allowed_roots)
+
+
+def get_safe_path(
+    user_path: str, allowed_roots: tuple[Path, ...] = ()
+) -> Path:
+    """
+    Validates and resolves a path to ensure it stays within the TRUSTED_ROOT
+    or one of the explicitly allowed roots (``--allow-path``).
     Raises ValueError if the path attempts to escape the workspace.
     """
     # 2. Sanitize Input (e.g., expand tildes so they resolve to an absolute path outside workspace)
@@ -1242,11 +1322,8 @@ def get_safe_path(user_path: str) -> Path:
     # 3. Resolve the Candidate Path (expand .. and follow symlinks to their true location)
     candidate = sanitized.resolve()
 
-    # 4. Validate Containment (Check if the resolved path is relative to the trusted root)
-    try:
-        # Path.relative_to() throws a ValueError if 'candidate' is not a subpath of TRUSTED_ROOT
-        candidate.relative_to(TRUSTED_ROOT)
-    except ValueError:
+    # 4. Validate Containment (workspace, or an explicitly allowed root)
+    if not is_path_permitted(candidate, allowed_roots):
         raise ValueError(
             f"Security Error: Path '{user_path}' resolves outside the trusted workspace."
         )
@@ -1257,6 +1334,7 @@ def get_safe_path(user_path: str) -> Path:
 def create_list_files_tool(
     max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
     respect_ignore_files: bool = True,
+    allowed_roots: tuple[Path, ...] = (),
 ):
     ignore = get_workspace_ignore(respect_ignore_files)
 
@@ -1264,7 +1342,7 @@ def create_list_files_tool(
     def configured_list_files(path: str = ".", recursive: bool = False) -> str:
         """Lists files and directories in the specified path."""
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
         if not safe_path.is_dir():
@@ -1336,6 +1414,7 @@ def render_numbered_line(line: str, show_whitespace: bool) -> str:
 def create_read_file_tool(
     max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
     respect_ignore_files: bool = True,
+    allowed_roots: tuple[Path, ...] = (),
 ):
     ignore = get_workspace_ignore(respect_ignore_files)
 
@@ -1359,7 +1438,7 @@ def create_read_file_tool(
         Paths excluded by .gitignore or .aiignore are refused.
         """
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
         if not safe_path.is_file():
@@ -1421,6 +1500,7 @@ def iter_searchable_files(root: Path, ignore: "WorkspaceIgnore | None" = None):
 def create_search_files_tool(
     max_input_lines: int = DEFAULT_MAX_INPUT_LINES,
     respect_ignore_files: bool = True,
+    allowed_roots: tuple[Path, ...] = (),
 ):
     ignore = get_workspace_ignore(respect_ignore_files)
 
@@ -1444,7 +1524,7 @@ def create_search_files_tool(
         Paths excluded by .gitignore or .aiignore are skipped.
         """
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
         if not safe_path.exists():
@@ -1481,7 +1561,7 @@ def create_search_files_tool(
                             if len(results) == max_input_lines:
                                 truncated = True
                                 break
-                            clean_filepath = os.path.relpath(filepath, TRUSTED_ROOT)
+                            clean_filepath = display_path(filepath)
                             results.append(f"{clean_filepath}:{i}: {line.rstrip()}")
             except (UnicodeDecodeError, PermissionError):
                 continue
@@ -1506,7 +1586,9 @@ read_file = create_read_file_tool()
 search_files = create_search_files_tool()
 
 
-def create_write_file_tool(respect_ignore_files: bool = True):
+def create_write_file_tool(
+    respect_ignore_files: bool = True, allowed_roots: tuple[Path, ...] = ()
+):
     ignore = get_workspace_ignore(respect_ignore_files)
 
     @tool("write_file")
@@ -1522,7 +1604,7 @@ def create_write_file_tool(respect_ignore_files: bool = True):
         whose parent directory would have to be created inside an ignored tree.
         """
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
 
@@ -1542,7 +1624,9 @@ def create_write_file_tool(respect_ignore_files: bool = True):
     return configured_write_file
 
 
-def create_edit_file_tool(respect_ignore_files: bool = True):
+def create_edit_file_tool(
+    respect_ignore_files: bool = True, allowed_roots: tuple[Path, ...] = ()
+):
     ignore = get_workspace_ignore(respect_ignore_files)
 
     @tool("edit_file")
@@ -1583,7 +1667,7 @@ def create_edit_file_tool(respect_ignore_files: bool = True):
         Paths excluded by .gitignore or .aiignore are refused.
         """
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
 
@@ -1620,7 +1704,9 @@ def create_edit_file_tool(respect_ignore_files: bool = True):
     return configured_edit_file
 
 
-def create_append_file_tool(respect_ignore_files: bool = True):
+def create_append_file_tool(
+    respect_ignore_files: bool = True, allowed_roots: tuple[Path, ...] = ()
+):
     ignore = get_workspace_ignore(respect_ignore_files)
 
     @tool("append_file")
@@ -1630,7 +1716,7 @@ def create_append_file_tool(respect_ignore_files: bool = True):
         Paths excluded by .gitignore or .aiignore are refused.
         """
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
 
@@ -1660,7 +1746,9 @@ def create_append_file_tool(respect_ignore_files: bool = True):
     return configured_append_file
 
 
-def create_delete_path_tool(respect_ignore_files: bool = True):
+def create_delete_path_tool(
+    respect_ignore_files: bool = True, allowed_roots: tuple[Path, ...] = ()
+):
     ignore = get_workspace_ignore(respect_ignore_files)
 
     @tool("delete_path")
@@ -1679,12 +1767,15 @@ def create_delete_path_tool(respect_ignore_files: bool = True):
         the target rather than the link.
         """
         try:
-            safe_path = get_safe_path(path)
+            safe_path = get_safe_path(path, allowed_roots)
         except ValueError as e:
             return str(e)
 
         if safe_path == TRUSTED_ROOT:
             return "Error: Refusing to delete the workspace root."
+
+        if safe_path in allowed_roots:
+            return f"Error: Refusing to delete allowed root '{path}'."
 
         if not safe_path.exists():
             return f"Error: Path '{path}' does not exist."
@@ -1999,6 +2090,15 @@ async def chat(
             "editing workspace files"
         ),
     ),
+    allow_path: list[str] = typer.Option(
+        [],
+        "--allow-path",
+        help=(
+            "Allow the workspace tools to read and write another directory tree; "
+            "repeatable, must exist. Allowed trees are not governed by "
+            ".gitignore/.aiignore and are not sandboxed"
+        ),
+    ),
     debug: bool = typer.Option(
         False, help="Show tracebacks for unexpected errors"
     ),
@@ -2015,6 +2115,10 @@ async def chat(
         # Direct Python callers written before this option was added may omit it.
         if isinstance(respect_ignore_files, typer.models.OptionInfo):
             respect_ignore_files = True
+
+        # Direct Python callers written before this option was added may omit it.
+        if isinstance(allow_path, typer.models.OptionInfo):
+            allow_path = []
 
         # Validate parameter combinations
         if prompt and prompt_file:
@@ -2033,6 +2137,14 @@ async def chat(
 
         validate_shell_command_timeout(shell_command_timeout)
         validate_max_input_lines(max_input_lines)
+
+        # --allow-path only means something when the tools it widens are
+        # enabled; this codebase never silently ignores supplied input.
+        validate_allow_path_requires_workspace_tools(
+            allow_path, read_only_workspace_tools, read_write_workspace_tools
+        )
+
+        allowed_roots = resolve_allowed_paths(allow_path)
 
         # Structured output is only available in single-query mode.
         if structured_output and prompt is None and prompt_file is None:
@@ -2092,13 +2204,13 @@ async def chat(
             tools.append(create_read_url_tool(max_input_lines))
 
         configured_list_files = create_list_files_tool(
-            max_input_lines, respect_ignore_files
+            max_input_lines, respect_ignore_files, allowed_roots
         )
         configured_read_file = create_read_file_tool(
-            max_input_lines, respect_ignore_files
+            max_input_lines, respect_ignore_files, allowed_roots
         )
         configured_search_files = create_search_files_tool(
-            max_input_lines, respect_ignore_files
+            max_input_lines, respect_ignore_files, allowed_roots
         )
 
         # Read-write mode includes read-only tools and takes precedence when both
@@ -2109,10 +2221,10 @@ async def chat(
                     configured_list_files,
                     configured_read_file,
                     configured_search_files,
-                    create_write_file_tool(respect_ignore_files),
-                    create_edit_file_tool(respect_ignore_files),
-                    create_append_file_tool(respect_ignore_files),
-                    create_delete_path_tool(respect_ignore_files),
+                    create_write_file_tool(respect_ignore_files, allowed_roots),
+                    create_edit_file_tool(respect_ignore_files, allowed_roots),
+                    create_append_file_tool(respect_ignore_files, allowed_roots),
+                    create_delete_path_tool(respect_ignore_files, allowed_roots),
                 ]
             )
         elif read_only_workspace_tools:
