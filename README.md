@@ -74,7 +74,7 @@ endpoint options.
   - `edit_file` preserves existing line endings exactly (a CRLF file keeps CRLF), so `old_string` must match the on-disk line endings
   - `read_file` returns one numbered line per physical line and preserves trailing whitespace (pass `show_whitespace=true` to make it visible)
 - **MCP Integration** — Connect to external MCP servers for extended tool capabilities
-- **Human-in-the-Loop Approval** — Approve or reject tool calls before execution; only tools that require review are surfaced, and auto-run tools execute in the same turn
+- **Human-in-the-Loop Approval** — Approve or reject tool calls before execution; only tools that require review are surfaced, and auto-run tools (including all enabled workspace tools with `--auto-run-workspace-tools`) execute in the same turn
 - **Workspace Path Containment** — Built-in workspace file tools restrict paths to the working directory captured when Minutus starts; additional directory trees can be opted in explicitly with `--allow-path`; explicitly supplied CLI paths and other tools are not sandboxed
 - **Conversation Summarization** — Automatically summarizes long conversations to manage context limits
 - **Structured Output** — Supports JSON schema-based structured output for programmatic use
@@ -204,8 +204,9 @@ directory with any content is refused and nothing is ever deleted recursively.
 > directory captured at startup. Every enabled workspace tool — including
 > `write_file`, `edit_file`, `append_file`, and `delete_path` in read-write mode
 > — can then read, modify, and delete files in the named trees. Combined with
-> `--auto-run-all-tools` or `--non-interactive`, those changes can happen with no
-> human review. Use it only with trees you intend the assistant to alter.
+> `--auto-run-workspace-tools`, `--auto-run-all-tools`, or `--non-interactive`,
+> those changes can happen with no human review. Use it only with trees you
+> intend the assistant to alter.
 
 By default the workspace tools are confined to the working directory. Pass
 `--allow-path DIR` to permit one additional directory tree:
@@ -328,7 +329,40 @@ minutus --model-name gpt-6-sol \
   --read-only-workspace-tools \
   --auto-run-all-tools \
   --prompt "Find all TODO comments in this project"
+
+# Auto-run every enabled workspace tool
+minutus --model-name gpt-6-sol \
+  --read-only-workspace-tools \
+  --auto-run-workspace-tools \
+  --prompt "Find all TODO comments in this project"
 ```
+
+`--auto-run-workspace-tools` authorizes exactly the workspace tools that are
+enabled for the invocation, so one flag covers read-only or read-write mode
+without naming each tool:
+
+- With `--read-only-workspace-tools` it auto-runs `list_files`, `read_file`, and
+  `search_files`.
+- With `--read-write-workspace-tools` it auto-runs those plus `write_file`,
+  `edit_file`, `append_file`, and `delete_path`. Read-write mode still wins when
+  both workspace flags are supplied.
+- Other tools — `run_shell_command`, `read_url`, and every MCP tool — are **not**
+  authorized by this flag and stay gated by default. Use `--auto-run-tools` or
+  `--auto-run-all-tools` for those.
+- The flag requires `--read-only-workspace-tools` or
+  `--read-write-workspace-tools`, because on its own it would authorize nothing.
+- It is additive: combining it with `--auto-run-tools` auto-runs the union.
+
+Tool names must be unique across everything enabled for a run. Approval gating
+is keyed by tool name, so if two enabled tools share a name — for example an MCP
+server advertising a tool called `write_file` alongside the built-in
+`write_file` — Minutus refuses to start and reports the collision. Without that
+check an auto-run option could authorize the wrong tool of the pair. Rename or
+disable one of the conflicting tools.
+
+Enabling it in read-write mode means the model can create, rewrite, and delete
+files in the workspace with no human review, so the warning above applies with
+full force.
 
 ### Tool Approval
 
@@ -338,10 +372,10 @@ come from the run's human-in-the-loop interrupt, so only tools that actually
 require review are shown. A single model turn may call several tools, and each
 gated call is reviewed in the order it was requested.
 
-Tools authorized with `--auto-run-tools` or `--auto-run-all-tools` are not part
-of that review. They execute within the same model turn without prompting, so a
-turn that mixes an auto-run tool with a gated one prompts only for the gated
-tool.
+Tools authorized with `--auto-run-tools`, `--auto-run-all-tools`, or
+`--auto-run-workspace-tools` are not part of that review. They execute within
+the same model turn without prompting, so a turn that mixes an auto-run tool
+with a gated one prompts only for the gated tool.
 
 Rejecting a call does not stop the run: the rejection is returned to the model
 so it can continue, for example by taking a safer alternative or explaining
@@ -359,8 +393,9 @@ minutus --model-name gpt-6-sol \
 
 `--non-interactive` is available in single-query mode with `--prompt` or
 `--prompt-file`. It never prompts for tool approval. Tools authorized with
-`--auto-run-tools` or `--auto-run-all-tools` may execute; all other tool calls
-are rejected and the rejection is returned to the model so it can continue.
+`--auto-run-tools`, `--auto-run-all-tools`, or `--auto-run-workspace-tools` may
+execute; all other tool calls are rejected and the rejection is returned to the
+model so it can continue.
 Names passed to `--auto-run-tools` must match tools enabled for that invocation;
 unknown names are reported before the model and agent are created, including
 when `--auto-run-all-tools` is also supplied. Use `--print-tool-names` with the
@@ -511,6 +546,7 @@ Minutus uses the OpenAI-compatible API format. The following options are availab
 | `--allow-path` | Allow the workspace tools another directory tree; repeatable, must exist (can be repeated) | — |
 | `--auto-run-tools` | Enabled tool names that run without confirmation; unknown names are errors (can be repeated) | — |
 | `--auto-run-all-tools` | All tools run without confirmation | `False` |
+| `--auto-run-workspace-tools` | All enabled built-in workspace tools run without confirmation; covers read-only tools, or read-only plus read-write tools in read-write mode. Requires a workspace tool flag | `False` |
 | `--non-interactive` | Never prompt; reject tool calls not explicitly authorized | `False` |
 | `--structured-output` | Path to JSON schema for structured output | — |
 | `--structured-output-strategy` | Structured output strategy: `provider` or `tool` | `provider` |

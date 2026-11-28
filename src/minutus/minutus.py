@@ -131,6 +131,18 @@ DEFAULT_MAX_INPUT_LINES = 500
 # "Running tool:" progress line. Keys are always shown in full.
 TOOL_ARGUMENT_PREVIEW_CHARS = 40
 
+# Names of the built-in workspace tools. The read-only set is always available
+# in read-only mode; the read-write set is added on top of it in read-write mode.
+# These names drive --auto-run-workspace-tools, which must never authorize a
+# tool that is not a workspace tool (for example a shell or MCP tool).
+READ_ONLY_WORKSPACE_TOOL_NAMES = ("list_files", "read_file", "search_files")
+READ_WRITE_WORKSPACE_TOOL_NAMES = (
+    "write_file",
+    "edit_file",
+    "append_file",
+    "delete_path",
+)
+
 
 class WorkspaceIgnore:
     """Evaluates gitignore-style ignore files for the workspace tools.
@@ -371,6 +383,47 @@ def validate_allow_path_requires_workspace_tools(
     )
 
 
+def validate_auto_run_workspace_tools_requires_workspace_tools(
+    auto_run_workspace_tools: bool,
+    read_only_workspace_tools: bool,
+    read_write_workspace_tools: bool,
+) -> None:
+    """Reject ``--auto-run-workspace-tools`` when no workspace tool is enabled.
+
+    The flag authorizes exactly the enabled workspace tools, so supplying it
+    while every workspace tool is disabled would be silently ignored input.
+    This codebase rejects such input rather than discarding it.
+    """
+    if not auto_run_workspace_tools:
+        return
+    if read_only_workspace_tools or read_write_workspace_tools:
+        return
+    fail(
+        "Error: auto-run-workspace-tools requires --read-only-workspace-tools or "
+        "--read-write-workspace-tools"
+    )
+
+
+def resolve_auto_run_workspace_tools(
+    auto_run_workspace_tools: bool,
+    read_only_workspace_tools: bool,
+    read_write_workspace_tools: bool,
+) -> list[str]:
+    """Return the workspace tool names authorized by auto-run mode.
+
+    Read-write mode includes the read-only tools and takes precedence when both
+    workspace flags are supplied, mirroring how the tools are registered. The
+    result is empty when the option is off, so tool gating is unchanged.
+    """
+    if not auto_run_workspace_tools:
+        return []
+    if read_write_workspace_tools:
+        return list(READ_ONLY_WORKSPACE_TOOL_NAMES + READ_WRITE_WORKSPACE_TOOL_NAMES)
+    if read_only_workspace_tools:
+        return list(READ_ONLY_WORKSPACE_TOOL_NAMES)
+    return []
+
+
 def validate_max_input_lines(max_input_lines: int) -> None:
     """Reject non-positive input line limits."""
     if max_input_lines <= 0:
@@ -417,6 +470,70 @@ def fail(message: str) -> None:
     """Report a command failure and exit with a non-zero status."""
     write_diagnostic(message)
     raise typer.Exit(1)
+
+
+def validate_unique_tool_names(
+    tools: list[Any], workspace_tools: list[Any]
+) -> None:
+    """Reject an enabled tool set in which two tools share a name.
+
+    Approval gating is keyed by tool name (``interrupt_on`` is a name-keyed
+    mapping), so two enabled tools with the same name can never be gated
+    independently. That makes every auto-run option unsound for that name: a
+    non-workspace tool that claims a workspace tool's name, for example, would
+    be authorized by ``--auto-run-workspace-tools`` even though the flag is
+    documented to cover built-in workspace tools only.
+
+    Workspace tools are identified by object identity, not by name, so a tool
+    from another source that merely reuses the name is reported as the
+    collision rather than being confused with the real workspace tool.
+
+    Validation happens after tool discovery, because MCP tool names are only
+    known once the configured servers have advertised their tools, and before
+    any model call or tool execution, so an ambiguous tool set never runs.
+    """
+    workspace_ids = {id(tool) for tool in workspace_tools}
+
+    # name -> one boolean per occurrence, True when the occurrence is a
+    # registered workspace tool. A length above one means the name is ambiguous.
+    occurrences: dict[str, list[bool]] = {}
+    for tool in tools:
+        occurrences.setdefault(tool.name, []).append(id(tool) in workspace_ids)
+
+    duplicates = {
+        name: is_workspace
+        for name, is_workspace in occurrences.items()
+        if len(is_workspace) > 1
+    }
+    if not duplicates:
+        return
+
+    # A collision that involves a workspace tool is the dangerous case: an
+    # auto-run flag for that name could authorize the wrong tool.
+    workspace_names = sorted(
+        name for name, flags in duplicates.items() if any(flags)
+    )
+    other_names = sorted(
+        name for name, flags in duplicates.items() if not any(flags)
+    )
+
+    details = []
+    if workspace_names:
+        details.append(
+            "workspace tool name(s) also used by another enabled tool: "
+            f"{', '.join(workspace_names)}"
+        )
+    if other_names:
+        details.append(
+            "name(s) used by more than one enabled tool: "
+            f"{', '.join(other_names)}"
+        )
+    fail(
+        f"Error: tool name collision detected ({'; '.join(details)}). Approval "
+        "gating is keyed by tool name, so tools sharing a name cannot be "
+        "authorized independently and an auto-run option could allow the wrong "
+        "tool. Rename or disable one of the conflicting tools."
+    )
 
 
 def validate_auto_run_tools(
@@ -2022,11 +2139,22 @@ async def chat(
             "trusted inputs or in an isolated environment"
         ),
     ),
+    auto_run_workspace_tools: bool = typer.Option(
+        False,
+        help=(
+            "Allow all enabled built-in workspace tools to run without "
+            "confirmation: the read-only tools with "
+            "--read-only-workspace-tools, plus the read-write tools when "
+            "--read-write-workspace-tools is supplied. Requires one of those "
+            "flags; use only with trusted inputs or in an isolated environment"
+        ),
+    ),
     non_interactive: bool = typer.Option(
         False,
         help=(
             "Never prompt for tool approval. Tool calls not authorized by "
-            "--auto-run-tools or --auto-run-all-tools are rejected."
+            "--auto-run-tools, --auto-run-all-tools, or "
+            "--auto-run-workspace-tools are rejected."
         ),
     ),
     temperature: float = typer.Option(None, help="Temperature for model"),
@@ -2120,6 +2248,10 @@ async def chat(
         if isinstance(allow_path, typer.models.OptionInfo):
             allow_path = []
 
+        # Direct Python callers written before this option was added may omit it.
+        if isinstance(auto_run_workspace_tools, typer.models.OptionInfo):
+            auto_run_workspace_tools = False
+
         # Validate parameter combinations
         if prompt and prompt_file:
             fail("Error: prompt and prompt-file cannot be set at the same time")
@@ -2142,6 +2274,14 @@ async def chat(
         # enabled; this codebase never silently ignores supplied input.
         validate_allow_path_requires_workspace_tools(
             allow_path, read_only_workspace_tools, read_write_workspace_tools
+        )
+
+        # Likewise, --auto-run-workspace-tools authorizes only the enabled
+        # workspace tools, so it is an error when none of them is enabled.
+        validate_auto_run_workspace_tools_requires_workspace_tools(
+            auto_run_workspace_tools,
+            read_only_workspace_tools,
+            read_write_workspace_tools,
         )
 
         allowed_roots = resolve_allowed_paths(allow_path)
@@ -2215,24 +2355,32 @@ async def chat(
 
         # Read-write mode includes read-only tools and takes precedence when both
         # workspace flags are supplied.
+        workspace_tools = []
         if read_write_workspace_tools:
-            tools.extend(
-                [
-                    configured_list_files,
-                    configured_read_file,
-                    configured_search_files,
-                    create_write_file_tool(respect_ignore_files, allowed_roots),
-                    create_edit_file_tool(respect_ignore_files, allowed_roots),
-                    create_append_file_tool(respect_ignore_files, allowed_roots),
-                    create_delete_path_tool(respect_ignore_files, allowed_roots),
-                ]
-            )
+            workspace_tools = [
+                configured_list_files,
+                configured_read_file,
+                configured_search_files,
+                create_write_file_tool(respect_ignore_files, allowed_roots),
+                create_edit_file_tool(respect_ignore_files, allowed_roots),
+                create_append_file_tool(respect_ignore_files, allowed_roots),
+                create_delete_path_tool(respect_ignore_files, allowed_roots),
+            ]
         elif read_only_workspace_tools:
-            tools.extend(
-                [configured_list_files, configured_read_file, configured_search_files]
-            )
+            workspace_tools = [
+                configured_list_files,
+                configured_read_file,
+                configured_search_files,
+            ]
+        tools.extend(workspace_tools)
 
         tools_names = [tool.name for tool in tools]
+
+        # Approve/reject gating is keyed by tool name, so an ambiguous tool set
+        # cannot be gated correctly. Reject it here: after MCP discovery, where
+        # third-party names first become known, and before credentials, agent
+        # creation, or any tool execution.
+        validate_unique_tool_names(tools, workspace_tools)
 
         # Tool discovery and printing do not require LLM credentials. Keep this
         # as a discovery-only operation, irrespective of auto-run options.
@@ -2278,9 +2426,31 @@ async def chat(
                 )
             )
 
-        # Create interrupt_on dictionary with False for auto_run_tools.
+        # Workspace tools authorized by --auto-run-workspace-tools. Narrowing the
+        # resolved names to the tools actually registered above keeps the flag
+        # self-checking: if tool registration ever changes, the flag can only
+        # ever authorize a tool that really is a registered workspace tool.
+        # Gating is keyed by tool name, so the remaining hazard is a non-workspace
+        # tool reusing a workspace name; validate_unique_tool_names() has already
+        # rejected that ambiguity before this point.
+        registered_workspace_tool_names = {tool.name for tool in workspace_tools}
+        auto_run_workspace_tool_names = {
+            name
+            for name in resolve_auto_run_workspace_tools(
+                auto_run_workspace_tools,
+                read_only_workspace_tools,
+                read_write_workspace_tools,
+            )
+            if name in registered_workspace_tool_names
+        }
+
+        # Create interrupt_on dictionary with False for auto-run tools.
         interrupt_on_dict = {
-            name: (name not in auto_run_tools and not auto_run_all_tools)
+            name: (
+                name not in auto_run_tools
+                and not auto_run_all_tools
+                and name not in auto_run_workspace_tool_names
+            )
             for name in tools_names
         }
         middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on_dict))
